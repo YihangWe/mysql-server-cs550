@@ -103,6 +103,7 @@ class Aggregator {
   friend class Item_sum_sum;
   friend class Item_sum_count;
   friend class Item_sum_avg;
+  friend class Item_sum_hyperloglog;
 
   /*
     All members are protected as this class is not usable outside of an
@@ -440,6 +441,7 @@ class Item_sum : public Item_func {
   enum Sumfunctype {
     COUNT_FUNC,           // COUNT
     COUNT_DISTINCT_FUNC,  // COUNT (DISTINCT)
+    HYPERLOGLOG_FUNC,     // HYPERLOGLOG
     SUM_FUNC,             // SUM
     SUM_DISTINCT_FUNC,    // SUM (DISTINCT)
     AVG_FUNC,             // AVG
@@ -929,7 +931,9 @@ class Aggregator_distinct : public Aggregator {
 */
 class Aggregator_simple : public Aggregator {
  public:
-  Aggregator_simple(Item_sum *sum) : Aggregator(sum) {}
+  Aggregator_simple(Item_sum *sum) : Aggregator(sum) {
+    // std::cout << "hyperloglog" << std::endl;
+  }
   Aggregator_type Aggrtype() override { return Aggregator::SIMPLE_AGGREGATOR; }
 
   bool setup(THD *thd) override { return item_sum->setup(thd); }
@@ -1063,6 +1067,61 @@ class Item_sum_sum : public Item_sum_num {
   void reset_field() override;
   void update_field() override;
   const char *func_name() const override { return "sum"; }
+  Item *copy_or_same(THD *thd) override;
+};
+
+// HLL
+class Item_sum_hyperloglog : public Item_sum_int {
+  longlong count;
+
+  friend class Aggregator_distinct;
+
+  void clear() override;
+  bool add() override;
+  void cleanup() override;
+
+ public:
+  uint32_t register_index_bits;
+  uint32_t register_number;
+  std::vector<uint32_t> registers;
+
+  Item_sum_hyperloglog(const POS &pos, Item *item_par, PT_window *w,
+                       uint32_t register_index_bits = 10)
+      : Item_sum_int(pos, item_par, w),
+        count(0),
+        register_index_bits(register_index_bits),
+        register_number(1U << register_index_bits),
+        registers(register_number, 0) {}
+
+  // Item_sum_hyperloglog(const POS &pos, PT_item_list *list, PT_window *w)
+  //     : Item_sum_int(pos, list, w), count(0) {
+  //   set_distinct(true);
+  // }
+
+  Item_sum_hyperloglog(THD *thd, Item_sum_hyperloglog *item)
+      : Item_sum_int(thd, item), count(item->count) {}
+
+  enum Sumfunctype sum_func() const override { return HYPERLOGLOG_FUNC; }
+
+  bool resolve_type(THD *thd) override {
+    if (param_type_is_default(thd, 0, -1)) return true;
+    set_nullable(false);
+    null_value = false;
+    return false;
+  }
+
+  void no_rows_in_result() override { count = 0; }
+
+  void make_const(longlong count_arg) {
+    count = count_arg;
+    Item_sum::make_const();
+  }
+
+  void calculate_hll_res();
+  longlong val_int() override;
+  void reset_field() override;
+  void update_field() override;
+  const char *func_name() const override { return "hyperloglog"; }
   Item *copy_or_same(THD *thd) override;
 };
 

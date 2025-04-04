@@ -391,6 +391,24 @@ bool optimize_aggregated_query(THD *thd, Query_block *select,
               ? down_cast<Item_func *>(conds)->functype()
               : Item_func::UNKNOWN_FUNC;
       switch (item_sum->sum_func()) {
+        // HLL
+        case Item_sum::HYPERLOGLOG_FUNC: {
+          Item_sum_hyperloglog *item_hyperloglog =
+              down_cast<Item_sum_hyperloglog *>(item_sum);
+          if (conds == nullptr && !item_hyperloglog->get_arg(0)->is_nullable() &&
+              !inner_tables && tables_filled) {
+            if (delay_ha_records_to_exec_phase) {
+              aggr_delayed = true;
+            } 
+          } else
+            aggr_impossible = true;
+
+          if (!thd->lex->is_explain() && !aggr_impossible && !aggr_delayed) {
+            item_hyperloglog->make_const((longlong)row_count);
+            recalc_const_item = true;
+          }
+          break;
+        }
         case Item_sum::COUNT_FUNC: {
           Item_sum_count *item_count = down_cast<Item_sum_count *>(item_sum);
           /*

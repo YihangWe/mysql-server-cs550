@@ -262,6 +262,7 @@ int AggregateIterator::Read() {
     case READING_FIRST_ROW: {
       // Start the first group, if possible. (If we're not at the first row,
       // we already saw the first row in the new group at the previous Read().)
+      std::cout << "AggregateIterator::Read() READING_FIRST_ROW" << std::endl;
       int err = m_source->Read();
       if (err == -1) {
         m_seen_eof = true;
@@ -338,6 +339,7 @@ int AggregateIterator::Read() {
                   ->reset_and_add_for_rollup(m_last_unchanged_group_item_idx))
             return true;
         } else {
+          std::cout << "AggregateIterator::Read() LAST_ROW_STARTED_NEW_GROUP" << std::endl;
           if ((*item)->reset_and_add()) return true;
         }
       }

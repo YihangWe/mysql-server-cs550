@@ -579,8 +579,7 @@ bool Item_sum::clean_up_after_removal(uchar *arg) {
       aggr_query_block->inner_sum_func_list = nullptr;
     else {
       Item_sum *prev;
-      for (prev = this; prev->next_sum != this; prev = prev->next_sum)
-        ;
+      for (prev = this; prev->next_sum != this; prev = prev->next_sum);
       prev->next_sum = next_sum;
       next_sum = nullptr;
 
@@ -2221,6 +2220,141 @@ bool Aggregator_distinct::arg_is_null(bool use_null_value) {
                            item_sum->args[0]->is_null());
 }
 
+Item *Item_sum_hyperloglog::copy_or_same(THD *thd) {
+  DBUG_TRACE;
+  Item *result = m_is_window_function ? this
+                                      : new (thd->mem_root)
+                                            Item_sum_hyperloglog(thd, this);
+  return result;
+}
+
+void Item_sum_hyperloglog::clear() { count = 0; }
+
+inline int32_t zero_num(uint32_t bits, uint32_t max_bits) {
+  if (bits == 0) return max_bits;
+  return __builtin_clz(bits) - (32 - max_bits);
+}
+
+// HLL function
+bool Item_sum_hyperloglog::add() {
+  assert(!m_is_window_function);
+  if (aggr->arg_is_null(false)) {
+    return current_thd->is_error();
+  }
+
+  double value = aggr->arg_val_real();
+  std::hash<double> double_hash;
+  uint32_t hash_value = static_cast<uint32_t>(double_hash(value));
+  uint32_t register_index = hash_value >> (32 - register_index_bits);
+  uint32_t bits = hash_value & ((1U << (32 - register_index_bits)) - 1);
+  uint32_t rank = zero_num(bits, 32 - register_index_bits) + 1;
+  if (rank > registers[register_index]) {
+    registers[register_index] = rank;
+  }
+
+  // if (current_thd->is_error()) return true;
+  if (!aggr->arg_is_null(true)) null_value = false;
+  return current_thd->is_error();
+}
+
+void Item_sum_hyperloglog::calculate_hll_res() {
+  // double alpha;
+  // if (register_number == 16) {
+  //   alpha = 0.673;
+  // } else if (register_number == 32) {
+  //   alpha = 0.697;
+  // } else if (register_number == 64) {
+  //   alpha = 0.709;
+  // } else {
+  //   alpha = 0.7213 / (1 + 1.079 / register_number);
+  // }
+
+  // double Z = 0.0;
+  // for (auto v : registers) {
+  //   Z += 1.0 / (1U << v);
+  // }
+  // double E = alpha * register_number * register_number / Z;
+
+  // if (E <= 2.5 * register_number) {
+  //   unsigned int V = 0;
+  //   for (auto v : registers) {
+  //     if (v == 0) V++;
+  //   }
+  //   if (V > 0)
+  //     E = register_number * std::log(static_cast<double>(register_number) /
+  //     V);
+  // } else if (E > (1.0 / 30) * (1ULL << 32)) {
+  //   E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
+  // }
+
+  // count = static_cast<unsigned int>(E);
+
+  double alpha = 0.7213 / (1 + 1.079 / register_number);
+  if (register_number == 16) {
+    alpha = 0.673;
+  } else if (register_number == 32) {
+    alpha = 0.697;
+  } else if (register_number == 64) {
+    alpha = 0.709;
+  }
+
+  double Z = 0.0;
+  unsigned int V = 0;
+  for (auto v : registers) {
+    Z += 1.0 / (1U << v);
+    if (v == 0) V++;
+  }
+  double E = alpha * register_number * register_number / Z;
+
+  if (E <= 2.5 * register_number && V > 0) {
+    E = register_number * std::log(static_cast<double>(register_number) / V);
+  } else if (E > (1.0 / 30) * (1ULL << 32)) {
+    E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
+  }
+
+  count = static_cast<unsigned int>(E);
+}
+
+longlong Item_sum_hyperloglog::val_int() {
+  DBUG_TRACE;
+  assert(fixed);
+  if (m_is_window_function) {
+    if (wf_common_init()) return 0;
+
+    DBUG_EXECUTE_IF(("enter"), {
+      DBUG_PRINT("enter", ("Item_sum_hyperloglog::val_int arg0 %p", args[0]));
+      if (dynamic_cast<Item_field *>(args[0])) {
+        Item_field *f = down_cast<Item_field *>(args[0]);
+        DBUG_PRINT(("enter"),
+                   ("Item_sum_hyperloglog::val_int field: %p ptr: %p", f->field,
+                    f->field->field_ptr()));
+      }
+    });
+
+    if (args[0]->is_null()) {
+      return count;
+    }
+    if (m_window->do_inverse()) {
+      if (count > 0) count--;
+    } else {
+      count++;
+    }
+    null_value = false;
+
+    return count;
+  } else {
+    calculate_hll_res();
+    if (aggr) aggr->endup();
+    return count;
+  }
+}
+
+void Item_sum_hyperloglog::cleanup() {
+  DBUG_TRACE;
+  count = 0;
+  Item_sum_int::cleanup();
+}
+
 Item *Item_sum_count::copy_or_same(THD *thd) {
   DBUG_TRACE;
   Item *result = m_is_window_function ? this
@@ -3458,6 +3592,14 @@ void Item_sum_sum::reset_field() {
     result_field->set_notnull();
 }
 
+void Item_sum_hyperloglog::reset_field() {
+  longlong nr = 0;
+  assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
+
+  if (!args[0]->is_nullable() || !args[0]->is_null()) nr = 1;
+  int8store(result_field->field_ptr(), nr);
+}
+
 void Item_sum_count::reset_field() {
   longlong nr = 0;
   assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
@@ -3557,6 +3699,15 @@ void Item_sum_sum::update_field() {
     }
     float8store(res, old_nr);
   }
+}
+
+void Item_sum_hyperloglog::update_field() {
+  longlong nr;
+  uchar *res = result_field->field_ptr();
+
+  nr = sint8korr(res);
+  if (!args[0]->is_nullable() || !args[0]->is_null()) nr++;
+  int8store(res, nr);
 }
 
 void Item_sum_count::update_field() {
