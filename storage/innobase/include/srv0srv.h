@@ -1261,3 +1261,5 @@ struct srv_slot_t {
 #endif /* !UNIV_HOTBACKUP */
 
 #endif
+
+extern bool srv_use_clock_sweep;

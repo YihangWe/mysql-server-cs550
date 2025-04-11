@@ -3273,3 +3273,5 @@ void set_srv_redo_log(bool enable) {
   srv_redo_log = enable;
   mutex_exit(&srv_innodb_monitor_mutex);
 }
+
+bool srv_use_clock_sweep = false;

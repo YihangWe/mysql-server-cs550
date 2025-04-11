@@ -636,16 +636,16 @@ const struct _ft_vft_ext ft_vft_ext_result = {
 
 #ifdef HAVE_PSI_INTERFACE
 #define PSI_KEY(n, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, flag, volatility, doc }
+  {&(n##_key.m_value), #n, flag, volatility, doc}
 #define PSI_MEMORY_KEY(n, flag, volatility, doc) \
-  { &(n##_key), #n, flag, volatility, doc }
+  {&(n##_key), #n, flag, volatility, doc}
 #define PSI_MUTEX_KEY(n, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, flag, volatility, doc }
+  {&(n##_key.m_value), #n, flag, volatility, doc}
 /* All RWLOCK used in Innodb are SX-locks */
 #define PSI_RWLOCK_KEY(n, volatility, doc) \
-  { &n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc }
+  {&n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc}
 #define PSI_THREAD_KEY(n, osn, flag, volatility, doc) \
-  { &(n##_key.m_value), #n, osn, flag, volatility, doc }
+  {&(n##_key.m_value), #n, osn, flag, volatility, doc}
 
 /* Keys to register pthread mutexes/cond in the current file with
 performance schema */
@@ -1106,6 +1106,11 @@ static MYSQL_THDVAR_ULONG(
     1,                                               /* Minimum. */
     Parallel_reader::MAX_THREADS,                    /* Maximum. */
     0);
+
+static MYSQL_SYSVAR_BOOL(use_clock_sweep, srv_use_clock_sweep,
+                         PLUGIN_VAR_RQCMDARG,
+                         "Use clock sweep algorithm for buffer pool flushing",
+                         NULL, NULL, 1);
 
 static MYSQL_THDVAR_ULONG(ddl_buffer_size, PLUGIN_VAR_RQCMDARG,
                           "Maximum size of memory to use (in bytes) for DDL.",
@@ -3532,8 +3537,7 @@ void Validate_files::check(const Const_iter &begin, const Const_iter &end,
       It should be able to reuse the deleted smaller ones later */
       auto current_max = m_space_max_id.load();
       while (current_max < space_id &&
-             !m_space_max_id.compare_exchange_weak(current_max, space_id))
-        ;
+             !m_space_max_id.compare_exchange_weak(current_max, space_id));
     }
 
     /* System and temp files are tracked and opened separately.
@@ -23711,6 +23715,7 @@ static SYS_VAR *innobase_system_variables[] = {
 #endif /* UNIV_DEBUG */
     MYSQL_SYSVAR(parallel_read_threads),
     MYSQL_SYSVAR(segment_reserve_factor),
+    MYSQL_SYSVAR(use_clock_sweep),
     nullptr};
 
 mysql_declare_plugin(innobase){

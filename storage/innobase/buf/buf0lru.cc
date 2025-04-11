@@ -1318,6 +1318,112 @@ buf_block_t *buf_LRU_get_free_block(buf_pool_t *buf_pool) {
   ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
   MONITOR_INC(MONITOR_LRU_GET_FREE_SEARCH);
+
+  if (srv_use_clock_sweep) {
+    buf_page_t *next = nullptr;
+    buf_page_t *cur = nullptr;
+    buf_block_t *candidate = nullptr;
+
+    int cnt = 0;
+    bool flag = false;
+
+    while (true) {
+      buf_LRU_check_size_of_non_data_objects(buf_pool);
+
+      block = buf_LRU_get_free_only(buf_pool);
+
+      /** Exit if there is block in free list */
+      if (block != nullptr) {
+        ut_ad(!block->page.someone_has_io_responsibility());
+        ut_ad(buf_pool_from_block(block) == buf_pool);
+        memset(&block->page.zip, 0, sizeof block->page.zip);
+        if (started_monitor) {
+          srv_innodb_needs_monitoring--;
+        }
+        return block;
+      }
+
+      os_aio_simulated_wake_handler_threads();
+
+      MONITOR_INC(MONITOR_LRU_GET_FREE_LOOPS);
+
+      freed = false;
+
+      mutex_enter(&buf_pool->LRU_list_mutex);
+
+      if (buf_pool->clock_hand == nullptr) {
+        if (buf_pool->LRU_old == nullptr) {
+          buf_pool->clock_hand = UT_LIST_GET_FIRST(buf_pool->LRU);
+        } else {
+          buf_pool->clock_hand = buf_pool->LRU_old;
+        }
+      }
+
+      while (true) {
+        next = UT_LIST_GET_NEXT(LRU, buf_pool->clock_hand);
+
+        if (next == nullptr) {
+          if (buf_pool->LRU_old == nullptr) {
+            next = UT_LIST_GET_FIRST(buf_pool->LRU);
+          } else {
+            next = buf_pool->LRU_old;
+          }
+          flag = true;
+        }
+        cur = buf_pool->clock_hand;
+
+        buf_pool->clock_hand = next;
+
+        ut_ad(cur->in_LRU_list);
+        ut_ad(buf_page_in_file(cur));
+
+        const auto accessed = buf_page_is_accessed(cur);
+        candidate = reinterpret_cast<buf_block_t *>(cur);
+
+        if (candidate->use_count.load() == 0) {
+          auto mutex = buf_page_get_mutex(cur);
+          if (cur->was_stale()) {
+            freed = buf_page_free_stale(buf_pool, cur);
+          } else {
+            mutex_enter(mutex);
+
+            if (buf_flush_ready_for_replace(cur)) {
+              freed = buf_LRU_free_page(cur, true);
+            }
+            if (!freed) {
+              mutex_exit(mutex);
+            }
+          }
+          if (freed && accessed == std::chrono::steady_clock::time_point{}) {
+            /* Keep track of pages that are evicted without
+            ever being accessed. This gives us a measure of
+            the effectiveness of readahead */
+            ++buf_pool->stat.n_ra_pages_evicted;
+          }
+          ut_ad(!mutex_own(mutex));
+        } else {
+          candidate->use_count.fetch_sub(1);
+        }
+
+        if (freed) {
+          break;
+        }
+
+        if (flag) {
+          cnt++;
+          flag = false;
+          if (cnt > 2) {
+            break;
+          }
+        }
+      }
+      if (!freed) {
+        mutex_exit(&buf_pool->LRU_list_mutex);
+        MONITOR_INC(MONITOR_LRU_GET_FREE_WAITS);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+  }
 loop:
   buf_LRU_check_size_of_non_data_objects(buf_pool);
 
@@ -1684,6 +1790,11 @@ static inline void buf_LRU_add_block_low(buf_page_t *bpage, bool old) {
 
   incr_LRU_size_in_bytes(bpage, buf_pool);
 
+  if (srv_use_clock_sweep) {
+    buf_block_t *block = reinterpret_cast<buf_block_t *>(bpage);
+    block->use_count.store(1);
+  }
+
   if (UT_LIST_GET_LEN(buf_pool->LRU) > BUF_LRU_OLD_MIN_LEN) {
     ut_ad(buf_pool->LRU_old);
 
@@ -1727,6 +1838,15 @@ void buf_LRU_make_block_young(buf_page_t *bpage) {
   buf_pool_t *buf_pool = buf_pool_from_bpage(bpage);
 
   ut_ad(mutex_own(&buf_pool->LRU_list_mutex));
+
+  if (srv_use_clock_sweep) {
+    buf_block_t *block = reinterpret_cast<buf_block_t *>(bpage);
+    block->use_count.fetch_add(1);
+    if (block->use_count.load() > 5) {
+      block->use_count.store(5);
+      /* Limit the use count to 5 */
+    }
+  }
 
   if (bpage->old) {
     buf_pool->stat.n_pages_made_young++;

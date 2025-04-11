@@ -1118,8 +1118,6 @@ bool Query_expression::ExecuteIteratorQuery(THD *thd) {
     PFSBatchMode pfs_batch_mode(m_root_iterator.get());
 
     for (;;) {
-      std::cout << "Query_expression::execute: " 
-                  << "::Read()\n";
       int error = m_root_iterator->Read();
       DBUG_EXECUTE_IF("bug13822652_1", thd->killed = THD::KILL_QUERY;);
 

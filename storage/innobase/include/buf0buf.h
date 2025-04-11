@@ -1751,6 +1751,9 @@ struct buf_block_t {
   that buf_pool->page_hash can point to buf_page_t or buf_block_t */
   buf_page_t page;
 
+  /** experimental use count for clock sweep */
+  std::atomic<uint32_t> use_count;
+
 #ifndef UNIV_HOTBACKUP
   /** read-write lock of the buffer frame */
   BPageLock lock;
@@ -2456,6 +2459,10 @@ struct buf_pool_t {
   the LRU list; NULL if LRU length less than BUF_LRU_OLD_MIN_LEN; NOTE: when
   LRU_old != NULL, its length should always equal LRU_old_len */
   buf_page_t *LRU_old;
+
+  /** Clock Sweep pointer which points to the position to start the clock search
+   */
+  buf_page_t *clock_hand;
 
   /** Length of the LRU list from the block to which LRU_old points onward,
   including that block; see buf0lru.cc for the restrictions on this value; 0

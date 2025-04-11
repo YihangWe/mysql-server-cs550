@@ -764,6 +764,8 @@ static void buf_block_init(
 
   block->modify_clock = 0;
 
+  block->use_count.store(0);
+
   ut_d(block->page.file_page_was_freed = false);
 
   block->ahi.index = nullptr;
@@ -1243,6 +1245,8 @@ static void buf_pool_create(buf_pool_t *buf_pool, ulint buf_pool_size,
     buf_pool->withdraw_target = 0;
     UT_LIST_INIT(buf_pool->flush_list);
     UT_LIST_INIT(buf_pool->unzip_LRU);
+
+    buf_pool->clock_hand = nullptr;
 
 #if defined UNIV_DEBUG || defined UNIV_BUF_DEBUG
     UT_LIST_INIT(buf_pool->zip_clean);
@@ -5886,8 +5890,8 @@ bool buf_page_io_complete(buf_page_t *bpage, bool evict, IORequest *type,
       }
     }
 
-    DBUG_EXECUTE_IF("buf_page_import_corrupt_failure", page_not_corrupt
-                    : bpage = bpage;);
+    DBUG_EXECUTE_IF("buf_page_import_corrupt_failure",
+                    page_not_corrupt : bpage = bpage;);
 
     if (recv_recovery_is_on()) {
       /* Pages must be uncompressed for crash recovery. */
