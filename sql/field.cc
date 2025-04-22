@@ -1975,6 +1975,7 @@ bool Field::send_to_protocol(Protocol *protocol) const {
   char buff[MAX_FIELD_WIDTH];
   String tmp(buff, sizeof(buff), charset());
   String *res = val_str(&tmp);
+  std::cout << "Field: " << res->c_ptr_safe() << std::endl;
   return res ? protocol->store(res) : protocol->store_null();
 }
 
@@ -3962,6 +3963,7 @@ String *Field_long::val_str(String *val_buffer, String *) const {
 bool Field_long::send_to_protocol(Protocol *protocol) const {
   ASSERT_COLUMN_MARKED_FOR_READ;
   if (is_null()) return protocol->store_null();
+  std::cout << "Field: " << Field_long::val_int() << std::endl;
   return protocol->store_long(Field_long::val_int(),
                               zerofill ? field_length : 0);
 }

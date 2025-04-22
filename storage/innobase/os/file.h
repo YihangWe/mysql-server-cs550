@@ -62,7 +62,10 @@ struct Compression {
     ZLIB = 1,
 
     /** Use LZ4 faster variant, usually lower compression. */
-    LZ4 = 2
+    LZ4 = 2,
+
+    /** Use Zstandard */
+    ZSTD = 3,
   };
 
   /** Compressed page meta-data */
@@ -94,6 +97,7 @@ struct Compression {
       case NONE:
       case ZLIB:
       case LZ4:
+      case ZSTD:
         break;
       default:
         ut_error;
@@ -115,6 +119,9 @@ struct Compression {
         break;
       case LZ4:
         os << "LZ4";
+        break;
+      case ZSTD:
+        os << "ZSTD";
         break;
       default:
         os << "<UNKNOWN>";

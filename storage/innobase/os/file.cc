@@ -51,6 +51,20 @@ external tools. */
 
 #include <lz4.h>
 #include <zlib.h>
+#include <zstd.h>
+#include <chrono>
+#include <stdio.h>
+#include <execinfo.h>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+
+
+using std::chrono::high_resolution_clock;
+using std::chrono::microseconds;
+using std::chrono::duration_cast;
 
 /** Convert to a "string".
 @param[in]      type            The compression type
@@ -63,6 +77,8 @@ const char *Compression::to_string(Type type) {
       return ("Zlib");
     case LZ4:
       return ("LZ4");
+    case ZSTD:
+      return ("Zstd");
   }
 
   ut_d(ut_error);
@@ -189,7 +205,9 @@ dberr_t Compression::deserialize(bool dblwr_read, byte *src, byte *dst,
     case Compression::ZLIB: {
       uLongf zlen = header.m_original_size;
 
+      auto start = high_resolution_clock::now();
       if (uncompress(dst, &zlen, ptr, header.m_compressed_size) != Z_OK) {
+
         if (allocated) {
           ut::free(dst);
         }
@@ -200,38 +218,111 @@ dberr_t Compression::deserialize(bool dblwr_read, byte *src, byte *dst,
       ut_ad(zlen <= len);
       len = static_cast<ulint>(zlen);
 
+      auto end = high_resolution_clock::now();
+      auto duration_ms = duration_cast<microseconds>(end - start);
+
+      std::ofstream outfile("/home/mysql/output.txt", std::ios::app);
+        if (!outfile) {
+            std::cerr << "无法打开文件 /home/mysql/output.txt" << std::endl;
+            outfile.close();
+        }
+        
+        outfile << "zlib decompression metrics: time=" << duration_ms.count() << " mcs" << std::endl;
+        
+        outfile.close();
+
       break;
     }
 
     case Compression::LZ4:
 
-      if (dblwr_read) {
-        ret = LZ4_decompress_safe(
-            reinterpret_cast<char *>(ptr), reinterpret_cast<char *>(dst),
-            header.m_compressed_size, header.m_original_size);
+      {
+        if (dblwr_read) {
+          auto start = high_resolution_clock::now();
+          ret = LZ4_decompress_safe(
+              reinterpret_cast<char *>(ptr), reinterpret_cast<char *>(dst),
+              header.m_compressed_size, header.m_original_size);
+          auto end = high_resolution_clock::now();
+          auto duration_ms = duration_cast<microseconds>(end - start);
 
-      } else {
-        /* This can potentially read beyond the input
-        buffer if the data is malformed. According to
-        the LZ4 documentation it is a little faster
-        than the above function. When recovering from
-        the double write buffer we can afford to us the
-        slower function above. */
+          std::ofstream outfile("/home/mysql/output.txt", std::ios::app);
+          if (!outfile) {
+              std::cerr << "无法打开文件 /home/mysql/output.txt" << std::endl;
+              outfile.close();
+          }
+          
+          outfile << "lz4 decompression metrics (dblwr_read): time=" << duration_ms.count() << " mcs" << std::endl;
+          
+          outfile.close();
 
-        ret = LZ4_decompress_fast(reinterpret_cast<char *>(ptr),
-                                  reinterpret_cast<char *>(dst),
-                                  header.m_original_size);
+  
+        } else {
+          /* This can potentially read beyond the input
+          buffer if the data is malformed. According to
+          the LZ4 documentation it is a little faster
+          than the above function. When recovering from
+          the double write buffer we can afford to us the
+          slower function above. */
+          auto start = high_resolution_clock::now();
+          ret = LZ4_decompress_fast(reinterpret_cast<char *>(ptr),
+                                    reinterpret_cast<char *>(dst),
+                                    header.m_original_size);
+          auto end = high_resolution_clock::now();
+          auto duration_ms = duration_cast<microseconds>(end - start);
+
+          std::ofstream outfile("/home/mysql/output.txt", std::ios::app);
+          if (!outfile) {
+              std::cerr << "无法打开文件 /home/mysql/output.txt" << std::endl;
+              outfile.close();
+          }
+          
+          outfile << "lz4 decompression metrics: time=" << duration_ms.count() << " mcs" << std::endl;
+          
+          outfile.close();
+
+        }
+  
+        if (ret < 0) {
+          if (allocated) {
+            ut::free(dst);
+          }
+  
+          return (DB_IO_DECOMPRESS_FAIL);
+        }
+  
+        break;
       }
 
-      if (ret < 0) {
-        if (allocated) {
-          ut::free(dst);
+    case Compression::ZSTD:
+      {
+        auto start = high_resolution_clock::now();
+        ret = ZSTD_decompress(dst, header.m_original_size, ptr,
+                              header.m_compressed_size);
+
+        auto end = high_resolution_clock::now();
+        auto duration_ms = duration_cast<microseconds>(end - start);
+        
+        std::ofstream outfile("/home/mysql/output.txt", std::ios::app);
+          if (!outfile) {
+              std::cerr << "无法打开文件 /home/mysql/output.txt" << std::endl;
+              outfile.close();
+          }
+          
+          outfile << "zstd decompression metrics: time=" << duration_ms.count() << " mcs" << std::endl;
+          
+          outfile.close();
+
+
+        if (ZSTD_isError(ret) || ret <= 0 || ret > len) {
+          if (allocated) {
+            ut::free(dst);
+          }
+
+          return (DB_IO_DECOMPRESS_FAIL);
         }
 
-        return (DB_IO_DECOMPRESS_FAIL);
+        break;
       }
-
-      break;
 
     default:
 #ifdef UNIV_NO_ERR_MSGS

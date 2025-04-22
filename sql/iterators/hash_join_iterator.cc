@@ -735,6 +735,7 @@ bool HashJoinIterator::ReadNextHashJoinChunk() {
 bool HashJoinIterator::ReadRowFromProbeIterator() {
   assert(m_current_chunk == -1);
   const int result = m_probe_row_read ? 0 : m_probe_input->Read();
+  // const int result_right = m_build_input->Read();
   m_probe_row_read = false;
 
   if (result == 1) {
@@ -743,6 +744,7 @@ bool HashJoinIterator::ReadRowFromProbeIterator() {
     return true;
   }
 
+  // Have found a probe row data
   if (result == 0) {
     m_probe_input_tables.RequestRowId();
 
@@ -923,6 +925,10 @@ void HashJoinIterator::LookupProbeRowInHashTable() {
   bool null_in_join_key = ConstructJoinKey(
       thd(), m_join_conditions, m_probe_input_tables.tables_bitmap(),
       &m_temporary_row_and_join_key_buffer);
+      
+  bool null_in_join_key1 = ConstructJoinKey(
+      thd(), m_join_conditions, m_build_input_tables.tables_bitmap(),
+      &m_temporary_row_and_join_key_buffer);
 
   if (null_in_join_key) {
     if (m_join_type == JoinType::ANTI || m_join_type == JoinType::OUTER) {
@@ -940,6 +946,7 @@ void HashJoinIterator::LookupProbeRowInHashTable() {
   hash_join_buffer::Key key{m_temporary_row_and_join_key_buffer.ptr(),
                             m_temporary_row_and_join_key_buffer.length()};
 
+  // find a match from the hash table                          
   m_current_row =
       m_row_buffer.find(key).value_or(LinkedImmutableString{nullptr});
 
@@ -1116,6 +1123,7 @@ int HashJoinIterator::ReadNextJoinedRowFromHashTable() {
       assert(false);
   }
 
+  // try to find other row data with the same hash value, in the linkedlist
   m_current_row = m_current_row.Decode().next;
   return 0;
 }

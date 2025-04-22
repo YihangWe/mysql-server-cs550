@@ -103,8 +103,6 @@ class Aggregator {
   friend class Item_sum_sum;
   friend class Item_sum_count;
   friend class Item_sum_avg;
-  friend class Item_sum_hyperloglog;
-
   /*
     All members are protected as this class is not usable outside of an
     Item_sum descendant.
@@ -441,7 +439,6 @@ class Item_sum : public Item_func {
   enum Sumfunctype {
     COUNT_FUNC,           // COUNT
     COUNT_DISTINCT_FUNC,  // COUNT (DISTINCT)
-    HYPERLOGLOG_FUNC,     // HYPERLOGLOG
     SUM_FUNC,             // SUM
     SUM_DISTINCT_FUNC,    // SUM (DISTINCT)
     AVG_FUNC,             // AVG
@@ -453,6 +450,7 @@ class Item_sum : public Item_func {
     SUM_BIT_FUNC,         // BIT_AND, BIT_OR and BIT_XOR
     UDF_SUM_FUNC,         // user defined functions
     GROUP_CONCAT_FUNC,    // GROUP_CONCAT
+    AI_FUNC,              // AI
     JSON_AGG_FUNC,        // JSON_ARRAYAGG and JSON_OBJECTAGG
     ROW_NUMBER_FUNC,      // Window functions
     RANK_FUNC,
@@ -931,9 +929,7 @@ class Aggregator_distinct : public Aggregator {
 */
 class Aggregator_simple : public Aggregator {
  public:
-  Aggregator_simple(Item_sum *sum) : Aggregator(sum) {
-    // std::cout << "hyperloglog" << std::endl;
-  }
+  Aggregator_simple(Item_sum *sum) : Aggregator(sum) {}
   Aggregator_type Aggrtype() override { return Aggregator::SIMPLE_AGGREGATOR; }
 
   bool setup(THD *thd) override { return item_sum->setup(thd); }
@@ -1067,61 +1063,6 @@ class Item_sum_sum : public Item_sum_num {
   void reset_field() override;
   void update_field() override;
   const char *func_name() const override { return "sum"; }
-  Item *copy_or_same(THD *thd) override;
-};
-
-// HLL
-class Item_sum_hyperloglog : public Item_sum_int {
-  longlong count;
-
-  friend class Aggregator_distinct;
-
-  void clear() override;
-  bool add() override;
-  void cleanup() override;
-
- public:
-  uint32_t register_index_bits;
-  uint32_t register_number;
-  std::vector<uint32_t> registers;
-
-  Item_sum_hyperloglog(const POS &pos, Item *item_par, PT_window *w,
-                       uint32_t register_index_bits = 10)
-      : Item_sum_int(pos, item_par, w),
-        count(0),
-        register_index_bits(register_index_bits),
-        register_number(1U << register_index_bits),
-        registers(register_number, 0) {}
-
-  // Item_sum_hyperloglog(const POS &pos, PT_item_list *list, PT_window *w)
-  //     : Item_sum_int(pos, list, w), count(0) {
-  //   set_distinct(true);
-  // }
-
-  Item_sum_hyperloglog(THD *thd, Item_sum_hyperloglog *item)
-      : Item_sum_int(thd, item), count(item->count) {}
-
-  enum Sumfunctype sum_func() const override { return HYPERLOGLOG_FUNC; }
-
-  bool resolve_type(THD *thd) override {
-    if (param_type_is_default(thd, 0, -1)) return true;
-    set_nullable(false);
-    null_value = false;
-    return false;
-  }
-
-  void no_rows_in_result() override { count = 0; }
-
-  void make_const(longlong count_arg) {
-    count = count_arg;
-    Item_sum::make_const();
-  }
-
-  void calculate_hll_res();
-  longlong val_int() override;
-  void reset_field() override;
-  void update_field() override;
-  const char *func_name() const override { return "hyperloglog"; }
   Item *copy_or_same(THD *thd) override;
 };
 
@@ -2149,6 +2090,136 @@ int group_concat_key_cmp_with_order(const void *arg, const void *key1,
                                     const void *key2);
 int dump_leaf_key(void *key_arg, element_count count [[maybe_unused]],
                   void *item_arg);
+
+class Item_func_ai final : public Item_sum {
+  typedef Item_sum super;
+
+  /// True if DEEPSEEK has the DISTINCT attribute
+  bool distinct;
+  /// The number of ORDER BY items.
+  uint m_order_arg_count;
+  /// The number of selected items, aka the concat field list
+  uint m_field_arg_count;
+  /// Resolver context, points to containing query block
+  Name_resolution_context *context;
+  /// String containing separator between group items
+  String *separator;
+  /// question
+  String *question;
+  /// ai model
+  String *model;
+  /// target field
+  std::string target_field;
+  /// Describes the temporary table used to perform group concat
+  Temp_table_param *tmp_table_param{nullptr};
+  String result;
+  TREE tree_base;
+  TREE *tree{nullptr};
+
+  /**
+     If DISTINCT is used with this DEEPSEEK, this member is used to filter
+     out duplicates.
+     @see Item_func_ai::setup
+     @see Item_func_ai::add
+     @see Item_func_ai::clear
+   */
+  Unique *unique_filter{nullptr};
+  /// Temporary table used to perform group concat
+  TABLE *table{nullptr};
+  Mem_root_array<ORDER> order_array;
+  uint row_count{0};
+  /**
+    The maximum permitted result length in bytes as set in
+    group_concat_max_len system variable
+  */
+  uint group_concat_max_len{0};
+  bool warning_for_row{false};
+  bool force_copy_fields{false};
+  /// True if result has been written to output buffer.
+  bool m_result_finalized{false};
+  /**
+    Following is 0 normal object and pointer to original one for copy
+    (to correctly free resources)
+  */
+ Item_func_ai *original{nullptr};
+
+  friend int group_concat_key_cmp_with_distinct_deepseek(const void *arg,
+                                                const void *key1,
+                                                const void *key2);
+  friend int group_concat_key_cmp_with_order_deepseek(const void *arg, const void *key1,
+                                             const void *key2);
+  friend int dump_leaf_key_deepseek(void *key_arg, element_count count [[maybe_unused]],
+                           void *item_arg);
+
+ public:
+ Item_func_ai(const POS &pos, bool is_distinct,
+                         PT_item_list *select_list, String *question, String *model,
+                         PT_order_list *opt_order_list, String *separator,
+                         PT_window *w);
+
+  Item_func_ai(THD *thd, Item_func_ai *item);
+  ~Item_func_ai() override {
+    assert(original != nullptr || unique_filter == nullptr);
+  }
+
+  bool do_itemize(Parse_context *pc, Item **res) override;
+  void cleanup() override;
+
+  enum Sumfunctype sum_func() const override { return AI_FUNC; }
+  const char *func_name() const override { return "deepseek ai"; }
+  Item_result result_type() const override { return STRING_RESULT; }
+  Field *make_string_field(TABLE *table_arg) const override;
+  void clear() override;
+  bool add() override;
+  bool ask_ai();
+  void reset_field() override { assert(0); }   // not used
+  void update_field() override { assert(0); }  // not used
+  bool fix_fields(THD *, Item **) override;
+  bool setup(THD *thd) override;
+  void make_unique() override;
+  double val_real() override;
+  longlong val_int() override {
+    String *res;
+    int error;
+    if (!(res = val_str(&str_value))) return (longlong)0;
+    const char *end_ptr = res->ptr() + res->length();
+    return my_strtoll10(res->ptr(), &end_ptr, &error);
+  }
+  my_decimal *val_decimal(my_decimal *decimal_value) override {
+    return val_decimal_from_string(decimal_value);
+  }
+  bool get_date(MYSQL_TIME *ltime, my_time_flags_t fuzzydate) override {
+    return get_date_from_string(ltime, fuzzydate);
+  }
+  bool get_time(MYSQL_TIME *ltime) override {
+    return get_time_from_string(ltime);
+  }
+
+  bool has_distinct() const noexcept { return distinct; }
+  const String *get_separator_str() const noexcept { return separator; }
+  uint32_t get_group_concat_max_len() const noexcept {
+    return group_concat_max_len;
+  }
+  const Mem_root_array<ORDER> &get_order_array() const noexcept {
+    return order_array;
+  }
+
+  String *val_str(String *str) override;
+  Item *copy_or_same(THD *thd) override;
+  void no_rows_in_result() override;
+  void print(const THD *thd, String *str,
+             enum_query_type query_type) const override;
+  bool change_context_processor(uchar *arg) override {
+    context = pointer_cast<Item_ident::Change_context *>(arg)->m_context;
+    return false;
+  }
+
+  bool check_wf_semantics1(THD *, Query_block *,
+                           Window_evaluation_requirements *) override {
+    unsupported_as_wf();
+    return true;
+  }
+};
 
 class Item_func_group_concat final : public Item_sum {
   typedef Item_sum super;

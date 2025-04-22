@@ -30,15 +30,20 @@
 
 #include "sql/item_sum.h"
 
+#include <curl/curl.h>
 #include <algorithm>
 #include <bitset>
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>  // std::forward
+#include <iostream>
+#include <regex>
 
 #include "decimal.h"
 #include "field_types.h"
@@ -97,7 +102,10 @@
 #include "sql/uniques.h"           // Unique
 #include "sql/window.h"
 #include "string_with_len.h"
+#include "json.hpp"
+#include "httplib.h"
 
+using json = nlohmann::json;
 using std::max;
 using std::min;
 
@@ -2220,141 +2228,6 @@ bool Aggregator_distinct::arg_is_null(bool use_null_value) {
                            item_sum->args[0]->is_null());
 }
 
-Item *Item_sum_hyperloglog::copy_or_same(THD *thd) {
-  DBUG_TRACE;
-  Item *result = m_is_window_function ? this
-                                      : new (thd->mem_root)
-                                            Item_sum_hyperloglog(thd, this);
-  return result;
-}
-
-void Item_sum_hyperloglog::clear() { count = 0; }
-
-inline int32_t zero_num(uint32_t bits, uint32_t max_bits) {
-  if (bits == 0) return max_bits;
-  return __builtin_clz(bits) - (32 - max_bits);
-}
-
-// HLL function
-bool Item_sum_hyperloglog::add() {
-  assert(!m_is_window_function);
-  if (aggr->arg_is_null(false)) {
-    return current_thd->is_error();
-  }
-
-  double value = aggr->arg_val_real();
-  std::hash<double> double_hash;
-  uint32_t hash_value = static_cast<uint32_t>(double_hash(value));
-  uint32_t register_index = hash_value >> (32 - register_index_bits);
-  uint32_t bits = hash_value & ((1U << (32 - register_index_bits)) - 1);
-  uint32_t rank = zero_num(bits, 32 - register_index_bits) + 1;
-  if (rank > registers[register_index]) {
-    registers[register_index] = rank;
-  }
-
-  // if (current_thd->is_error()) return true;
-  if (!aggr->arg_is_null(true)) null_value = false;
-  return current_thd->is_error();
-}
-
-void Item_sum_hyperloglog::calculate_hll_res() {
-  // double alpha;
-  // if (register_number == 16) {
-  //   alpha = 0.673;
-  // } else if (register_number == 32) {
-  //   alpha = 0.697;
-  // } else if (register_number == 64) {
-  //   alpha = 0.709;
-  // } else {
-  //   alpha = 0.7213 / (1 + 1.079 / register_number);
-  // }
-
-  // double Z = 0.0;
-  // for (auto v : registers) {
-  //   Z += 1.0 / (1U << v);
-  // }
-  // double E = alpha * register_number * register_number / Z;
-
-  // if (E <= 2.5 * register_number) {
-  //   unsigned int V = 0;
-  //   for (auto v : registers) {
-  //     if (v == 0) V++;
-  //   }
-  //   if (V > 0)
-  //     E = register_number * std::log(static_cast<double>(register_number) /
-  //     V);
-  // } else if (E > (1.0 / 30) * (1ULL << 32)) {
-  //   E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
-  // }
-
-  // count = static_cast<unsigned int>(E);
-
-  double alpha = 0.7213 / (1 + 1.079 / register_number);
-  if (register_number == 16) {
-    alpha = 0.673;
-  } else if (register_number == 32) {
-    alpha = 0.697;
-  } else if (register_number == 64) {
-    alpha = 0.709;
-  }
-
-  double Z = 0.0;
-  unsigned int V = 0;
-  for (auto v : registers) {
-    Z += 1.0 / (1U << v);
-    if (v == 0) V++;
-  }
-  double E = alpha * register_number * register_number / Z;
-
-  if (E <= 2.5 * register_number && V > 0) {
-    E = register_number * std::log(static_cast<double>(register_number) / V);
-  } else if (E > (1.0 / 30) * (1ULL << 32)) {
-    E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
-  }
-
-  count = static_cast<unsigned int>(E);
-}
-
-longlong Item_sum_hyperloglog::val_int() {
-  DBUG_TRACE;
-  assert(fixed);
-  if (m_is_window_function) {
-    if (wf_common_init()) return 0;
-
-    DBUG_EXECUTE_IF(("enter"), {
-      DBUG_PRINT("enter", ("Item_sum_hyperloglog::val_int arg0 %p", args[0]));
-      if (dynamic_cast<Item_field *>(args[0])) {
-        Item_field *f = down_cast<Item_field *>(args[0]);
-        DBUG_PRINT(("enter"),
-                   ("Item_sum_hyperloglog::val_int field: %p ptr: %p", f->field,
-                    f->field->field_ptr()));
-      }
-    });
-
-    if (args[0]->is_null()) {
-      return count;
-    }
-    if (m_window->do_inverse()) {
-      if (count > 0) count--;
-    } else {
-      count++;
-    }
-    null_value = false;
-
-    return count;
-  } else {
-    calculate_hll_res();
-    if (aggr) aggr->endup();
-    return count;
-  }
-}
-
-void Item_sum_hyperloglog::cleanup() {
-  DBUG_TRACE;
-  count = 0;
-  Item_sum_int::cleanup();
-}
-
 Item *Item_sum_count::copy_or_same(THD *thd) {
   DBUG_TRACE;
   Item *result = m_is_window_function ? this
@@ -3592,14 +3465,6 @@ void Item_sum_sum::reset_field() {
     result_field->set_notnull();
 }
 
-void Item_sum_hyperloglog::reset_field() {
-  longlong nr = 0;
-  assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
-
-  if (!args[0]->is_nullable() || !args[0]->is_null()) nr = 1;
-  int8store(result_field->field_ptr(), nr);
-}
-
 void Item_sum_count::reset_field() {
   longlong nr = 0;
   assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
@@ -3699,15 +3564,6 @@ void Item_sum_sum::update_field() {
     }
     float8store(res, old_nr);
   }
-}
-
-void Item_sum_hyperloglog::update_field() {
-  longlong nr;
-  uchar *res = result_field->field_ptr();
-
-  nr = sint8korr(res);
-  if (!args[0]->is_nullable() || !args[0]->is_null()) nr++;
-  int8store(res, nr);
 }
 
 void Item_sum_count::update_field() {
@@ -4261,6 +4117,39 @@ int group_concat_key_cmp_with_distinct(const void *arg, const void *key1,
   return 0;
 }
 
+int group_concat_key_cmp_with_distinct_deepseek(const void *arg,
+                                                const void *key1,
+                                                const void *key2) {
+  DBUG_TRACE;
+  const Item_func_ai *item_func =
+      static_cast<const Item_func_ai *>(arg);
+  TABLE *table = item_func->table;
+
+  for (uint i = 0; i < item_func->m_field_arg_count; i++) {
+    Item *item = item_func->args[i];
+    /*
+    If item is a const item then either get_tmp_table_field returns 0
+    or it is an item over a const table.
+    */
+    if (item->const_item()) continue;
+    /*
+    We have to use get_tmp_table_field() instead of
+    real_item()->get_tmp_table_field() because we want the field in
+    the temporary table, not the original field
+    */
+    Field *field = item->get_tmp_table_field();
+
+    if (!field) continue;
+
+    const uint offset =
+        field->offset(field->table->record[0]) - table->s->null_bytes;
+    int res = field->cmp(pointer_cast<const uchar *>(key1) + offset,
+                         pointer_cast<const uchar *>(key2) + offset);
+    if (res) return res;
+  }
+  return 0;
+}
+
 /**
   function of sort for syntax: GROUP_CONCAT(expr,... ORDER BY col,... )
 */
@@ -4300,6 +4189,45 @@ int group_concat_key_cmp_with_order(const void *arg, const void *key1,
     We can't return 0 because in that case the tree class would remove this
     item as double value. This would cause problems for case-changes and
     if the returned values are not the same we do the sort on.
+  */
+  return 1;
+}
+
+int group_concat_key_cmp_with_order_deepseek(const void *arg, const void *key1,
+                                             const void *key2) {
+  DBUG_TRACE;
+  const Item_func_ai *grp_item =
+      static_cast<const Item_func_ai *>(arg);
+  const ORDER *order_item, *end;
+  TABLE *table = grp_item->table;
+
+  for (order_item = grp_item->order_array.begin(),
+      end = grp_item->order_array.end();
+       order_item < end; order_item++) {
+    Item *item = *(order_item)->item;
+    /*
+    If item is a const item then either get_tmp_table_field returns 0
+    or it is an item over a const table.
+    */
+    if (item->const_item()) continue;
+    /*
+    We have to use get_tmp_table_field() instead of
+    real_item()->get_tmp_table_field() because we want the field in
+    the temporary table, not the original field
+    */
+    Field *field = item->get_tmp_table_field();
+    if (!field) continue;
+
+    const uint offset =
+        (field->offset(field->table->record[0]) - table->s->null_bytes);
+    int res = field->cmp(pointer_cast<const uchar *>(key1) + offset,
+                         pointer_cast<const uchar *>(key2) + offset);
+    if (res) return ((order_item)->direction == ORDER_ASC) ? res : -res;
+  }
+  /*
+  We can't return 0 because in that case the tree class would remove this
+  item as double value. This would cause problems for case-changes and
+  if the returned values are not the same we do the sort on.
   */
   return 1;
 }
@@ -4384,6 +4312,691 @@ int dump_leaf_key(void *key_arg, element_count count [[maybe_unused]],
     return 1;
   }
   return 0;
+}
+
+int dump_leaf_key_deepseek(void *key_arg, element_count count [[maybe_unused]],
+                           void *item_arg) {
+  DBUG_TRACE;
+  Item_func_ai *item = (Item_func_ai *)item_arg;
+  TABLE *table = item->table;
+  String tmp((char *)table->record[1], table->s->reclength,
+             default_charset_info);
+  uchar *key = (uchar *)key_arg;
+  String *result = &item->result;
+  Item **arg = item->args, **arg_end = item->args + item->m_field_arg_count;
+  const size_t old_length = result->length();
+
+  if (!item->m_result_finalized)
+    item->m_result_finalized = true;
+  else
+    result->append(*item->separator);
+
+  tmp.length(0);
+
+  for (; arg < arg_end; arg++) {
+    String *res;
+    /*
+    We have to use get_tmp_table_field() instead of
+    real_item()->get_tmp_table_field() because we want the field in
+    the temporary table, not the original field
+    We also can't use table->field array to access the fields
+    because it contains both order and arg list fields.
+    */
+    if ((*arg)->const_item())
+      res = (*arg)->val_str(&tmp);
+    else {
+      Field *field = (*arg)->get_tmp_table_field();
+      if (item->target_field == "") {
+        item->target_field = field->field_name;
+      }
+      // std::cout << "Table Name: " << *field->table_name << std::endl;
+      // std::cout << "Field Name: " << field->field_name << std::endl;
+      if (field) {
+        const uint offset =
+            (field->offset(field->table->record[0]) - table->s->null_bytes);
+        assert(offset < table->s->reclength);
+        res = field->val_str(&tmp, key + offset);
+      } else
+        res = (*arg)->val_str(&tmp);
+    }
+    if (res) result->append(*res);
+  }
+
+  item->row_count++;
+
+  /*
+  Stop if the size of group_concat value, in bytes, is longer than
+  the maximum size.
+  */
+  if (result->length() > item->group_concat_max_len) {
+    int well_formed_error;
+    const CHARSET_INFO *cs = item->collation.collation;
+    const char *ptr = result->ptr();
+    size_t add_length;
+    /*
+    It's ok to use item->result.length() as the fourth argument
+    as this is never used to limit the length of the data.
+    Cut is done with the third argument.
+    */
+    add_length = cs->cset->well_formed_len(
+        cs, ptr + old_length, ptr + item->group_concat_max_len,
+        result->length(), &well_formed_error);
+    result->length(old_length + add_length);
+    item->warning_for_row = true;
+    push_warning_printf(
+        current_thd, Sql_condition::SL_WARNING, ER_CUT_VALUE_GROUP_CONCAT,
+        ER_THD(current_thd, ER_CUT_VALUE_GROUP_CONCAT), item->row_count);
+
+    /**
+    To avoid duplicated warnings in Item_func_ai::val_str()
+    */
+    if (table && table->blob_storage)
+      table->blob_storage->set_truncated_value(false);
+    return 1;
+  }
+  return 0;
+}
+
+/**
+  Constructor of Item_func_ai.
+
+  @param pos The token's position.
+  @param distinct_arg   distinct
+  @param select_list    list of expression for show values
+  @param opt_order_list list of sort columns
+  @param separator_arg  string value of separator.
+  @param w              window, iff we have a windowing use of GROUP_CONCAT
+*/
+
+Item_func_ai::Item_func_ai(const POS &pos, bool distinct_arg,
+                                       PT_item_list *select_list,
+                                       String *question,
+                                       String *model,
+                                       PT_order_list *opt_order_list,
+                                       String *separator_arg, PT_window *w)
+    : super(pos, w),
+      distinct(distinct_arg),
+      m_order_arg_count(opt_order_list ? opt_order_list->value.elements : 0),
+      m_field_arg_count(select_list->elements()),
+      separator(separator_arg),
+      question(question),
+      model(model),
+      target_field(""),
+      order_array(*THR_MALLOC) {
+  Item **arg_ptr;
+
+  allow_group_via_temp_table = false;
+  arg_count = m_field_arg_count + m_order_arg_count;
+
+  if (!(args = (Item **)(*THR_MALLOC)->Alloc(sizeof(Item *) * arg_count)))
+    return;
+
+  if (order_array.reserve(m_order_arg_count)) return;
+
+  /* fill args items of show and sort */
+  auto it = select_list->value.begin();
+
+  for (arg_ptr = args; it != select_list->value.end(); ++arg_ptr, ++it) {
+    *arg_ptr = *it;
+  }
+
+  if (m_order_arg_count > 0) {
+    for (ORDER *order_item = opt_order_list->value.first; order_item != nullptr;
+         order_item = order_item->next) {
+      order_array.push_back(*order_item);
+      *arg_ptr = *order_item->item;
+      order_array.back().item = arg_ptr++;
+    }
+    for (ORDER *ord = order_array.begin(); ord < order_array.end(); ++ord)
+      ord->next = ord != &order_array.back() ? ord + 1 : nullptr;
+  }
+}
+
+bool Item_func_ai::do_itemize(Parse_context *pc, Item **res) {
+  if (skip_itemize(res)) return false;
+  if (super::do_itemize(pc, res)) return true;
+  context = pc->thd->lex->current_context();
+  return false;
+}
+
+Item_func_ai::Item_func_ai(THD *thd, Item_func_ai *item)
+    : Item_sum(thd, item),
+      distinct(item->distinct),
+      m_order_arg_count(item->m_order_arg_count),
+      m_field_arg_count(item->m_field_arg_count),
+      context(item->context),
+      separator(item->separator),
+      tmp_table_param(item->tmp_table_param),
+      tree(item->tree),
+      unique_filter(item->unique_filter),
+      table(item->table),
+      order_array(thd->mem_root),
+      row_count(item->row_count),
+      group_concat_max_len(item->group_concat_max_len),
+      warning_for_row(item->warning_for_row),
+      force_copy_fields(item->force_copy_fields),
+      original(item) {
+  allow_group_via_temp_table = item->allow_group_via_temp_table;
+  result.set_charset(collation.collation);
+
+  /*
+  Since the ORDER structures pointed to by the elements of the 'order' array
+  may be modified in find_order_in_list() called from
+  Item_func_ai::setup(), create a copy of those structures so that
+  such modifications done in this object would not have any effect on the
+  object being copied.
+  */
+  if (order_array.reserve(m_order_arg_count)) return;
+
+  for (uint i = 0; i < m_order_arg_count; i++) {
+    /*
+    Compiler generated copy constructor is used to
+    to copy all the members of ORDER struct.
+    It's also necessary to update ORDER::next pointer
+    so that it points to new ORDER element.
+    */
+    order_array.push_back(item->order_array[i]);
+  }
+  if (m_order_arg_count > 0) {
+    for (ORDER *ord = order_array.begin(); ord < order_array.end(); ++ord)
+      ord->next = ord != &order_array.back() ? ord + 1 : nullptr;
+  }
+}
+
+void Item_func_ai::cleanup() {
+  DBUG_TRACE;
+  Item_sum::cleanup();
+
+  /*
+    Free table and tree if they belong to this item (if item have not pointer
+    to original item from which was made copy => it own its objects )
+  */
+  if (original == nullptr) {
+    if (tmp_table_param != nullptr) {
+      ::destroy_at(tmp_table_param);
+      tmp_table_param = nullptr;
+    }
+    if (table != nullptr) {
+      if (table->blob_storage != nullptr) ::destroy_at(table->blob_storage);
+      close_tmp_table(table);
+      free_tmp_table(table);
+      table = nullptr;
+      if (tree != nullptr) {
+        delete_tree(tree);
+        tree = nullptr;
+      }
+      if (unique_filter != nullptr) {
+        ::destroy_at(unique_filter);
+        unique_filter = nullptr;
+      }
+    }
+    assert(tree == nullptr);
+  }
+  row_count = 0;
+}
+
+Field *Item_func_ai::make_string_field(TABLE *table_arg) const {
+  Field *field;
+  assert(collation.collation);
+  /*
+    Use mbminlen to determine maximum number of characters.
+    Compared to using mbmaxlen, this provides ability to
+    accommodate more characters in case of charsets that
+    support variable length characters.
+    If the actual data has characters with length less than
+    mbmaxlen, with this approach more characters can be stored.
+  */
+
+  const uint32 max_characters =
+      group_concat_max_len / collation.collation->mbminlen;
+
+  // Avoid arithmetic overflow
+  const uint32 field_length = min<uint64>(
+      static_cast<uint64>(max_characters) * collation.collation->mbmaxlen,
+      UINT_MAX32);
+
+  if (max_characters > CONVERT_IF_BIGGER_TO_BLOB)
+    field = new (*THR_MALLOC)
+        Field_blob(field_length, is_nullable(), item_name.ptr(),
+                   collation.collation, true);
+  else
+    field = new (*THR_MALLOC)
+        Field_varstring(field_length, is_nullable(), item_name.ptr(),
+                        table_arg->s, collation.collation);
+
+  if (field) field->init(table_arg);
+  return field;
+}
+
+Item *Item_func_ai::copy_or_same(THD *thd) {
+  DBUG_TRACE;
+  Item *result = m_is_window_function ? this
+                                      : new (thd->mem_root)
+                                            Item_func_ai(thd, this);
+  return result;
+}
+
+void Item_func_ai::no_rows_in_result() { clear(); }
+
+void Item_func_ai::clear() {
+  result.length(0);
+  result.copy();
+  null_value = true;
+  warning_for_row = false;
+  m_result_finalized = false;
+  if (tree) reset_tree(tree);
+  if (unique_filter) unique_filter->reset();
+  if (table && table->blob_storage) table->blob_storage->reset();
+  /* No need to reset the table as we never call write_row */
+}
+
+bool Item_func_ai::add() {
+  if (m_null_executed) return false;
+  THD *thd = current_thd;
+  if (copy_funcs(tmp_table_param, thd)) return true;
+
+  for (uint i = 0; i < m_field_arg_count; i++) {
+    Item *item = args[i];
+    if (item->const_for_execution()) {
+      continue;
+    }
+    Field *field = item->get_tmp_table_field();
+    if (field && field->is_null_in_record((const uchar *)table->record[0])) {
+      return false;  // Skip row if it contains null
+    }
+  }
+
+  null_value = false;
+  bool row_eligible = true;
+
+  if (distinct) {
+    /* Filter out duplicate rows. */
+    const uint count = unique_filter->elements_in_tree();
+    unique_filter->unique_add(table->record[0] + table->s->null_bytes);
+    if (count == unique_filter->elements_in_tree()) row_eligible = false;
+  }
+
+  TREE_ELEMENT *el = nullptr;  // Only for safety
+  if (row_eligible && tree) {
+    DBUG_EXECUTE_IF("trigger_OOM_in_gconcat_add",
+                    DBUG_SET("+d,simulate_persistent_out_of_memory"););
+    el = tree_insert(tree, table->record[0] + table->s->null_bytes, 0,
+                     tree->custom_arg);
+
+    DBUG_EXECUTE_IF("trigger_OOM_in_gconcat_add",
+                    DBUG_SET("-d,simulate_persistent_out_of_memory"););
+    /* check if there was enough memory to insert the row */
+    if (!el) return true;
+  }
+  /*
+    In case of GROUP_CONCAT with DISTINCT or ORDER BY (or both) don't dump the
+    row to the output buffer here. That will be done in val_str.
+  */
+  if (row_eligible && !warning_for_row && tree == nullptr && !distinct) {
+    dump_leaf_key_deepseek(table->record[0] + table->s->null_bytes, 1, this);
+    if (current_thd->is_error()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool Item_func_ai::fix_fields(THD *thd, Item **ref) {
+  if (super::fix_fields(thd, ref)) return true;
+
+  if (init_sum_func_check(thd)) return true;
+
+  set_nullable(true);
+
+  const Condition_context CCT(thd->lex->current_query_block());
+
+  // Fix fields for select list and ORDER clause
+
+  for (uint i = 0; i < arg_count; i++) {
+    if ((!args[i]->fixed && args[i]->fix_fields(thd, args + i)) ||
+        args[i]->check_cols(1))
+      return true;
+  }
+
+  if (param_type_is_default(thd, 0, -1)) return true;
+
+  // Aggregate character set for expression columns (not order columns)
+  if (agg_item_charsets_for_string_result(collation, func_name(), args,
+                                          m_field_arg_count))
+    return true;
+
+  result.set_charset(collation.collation);
+  group_concat_max_len = thd->variables.group_concat_max_len;
+  if (thd->variables.group_concat_max_len > UINT_MAX32)
+    group_concat_max_len = UINT_MAX32;
+  else
+    group_concat_max_len =
+        static_cast<uint>(thd->variables.group_concat_max_len);
+  const uint32 max_chars = group_concat_max_len / collation.collation->mbminlen;
+  // Avoid arithmetic overflow
+  uint32 max_byte_length = min<uint64>(
+      static_cast<uint64>(max_chars) * collation.collation->mbmaxlen,
+      UINT_MAX32);
+  max_chars > CONVERT_IF_BIGGER_TO_BLOB
+      ? set_data_type_blob(MYSQL_TYPE_LONG_BLOB, max_byte_length)
+      : set_data_type_string(max_chars);
+
+  size_t offset;
+  if (separator->needs_conversion(separator->length(), separator->charset(),
+                                  collation.collation, &offset)) {
+    size_t buflen = collation.collation->mbmaxlen * separator->length();
+
+    char *buf = pointer_cast<char *>(thd->alloc(buflen));
+    if (buf == nullptr) return true;
+
+    String *new_separator =
+        new (thd->mem_root) String(buf, buflen, collation.collation);
+    if (new_separator == nullptr) return true;
+
+    uint errors;
+    const size_t conv_length =
+        copy_and_convert(buf, buflen, collation.collation, separator->ptr(),
+                         separator->length(), separator->charset(), &errors);
+    new_separator->length(conv_length);
+    separator = new_separator;
+  }
+
+  if (check_sum_func(thd, ref)) return true;
+
+  // Create a list with all the non-NULL fields:
+  mem_root_deque<Item *> fields(thd->mem_root);
+  for (uint i = 0; i < m_field_arg_count; i++) {
+    Item *item = args[i];
+    fields.push_back(item);
+    if (item->const_item() && !thd->lex->is_view_context_analysis() &&
+        item->is_null()) {
+      // "is_null()" may cause error:
+      if (thd->is_error()) return true;
+      m_null_resolved = true;
+    }
+  }
+
+  /*
+    Find and resolve every ORDER BY expression in the list of GROUP_CONCAT
+    arguments.
+    The "fields" list is not used after the call to setup_order(), however it
+    must be recreated during optimization to create tmp table columns.
+  */
+  if (m_order_arg_count > 0 && !m_null_resolved &&
+      setup_order(thd, Ref_item_array(args, arg_count), context->table_list,
+                  &fields, order_array.begin()))
+    return true;
+
+  null_value = true;
+
+  fixed = true;
+
+  return false;
+}
+
+bool Item_func_ai::setup(THD *thd) {
+  DBUG_TRACE;
+  /*
+    Currently setup() can be called twice. Please add
+    assertion here when this is fixed.
+  */
+  if (table != nullptr || tree != nullptr) return false;
+
+  // If resolved as NULL, execution is always NULL
+  m_null_executed = m_null_resolved;
+  // Nothing to set up if value is NULL:
+  if (m_null_executed) return false;
+
+  assert(thd->lex->current_query_block() == aggr_query_block);
+
+  uint new_max_len;
+  if (thd->variables.group_concat_max_len > UINT_MAX32)
+    new_max_len = UINT_MAX32;
+  else
+    new_max_len = static_cast<uint>(thd->variables.group_concat_max_len);
+  if (group_concat_max_len < new_max_len) {
+    /*
+      Probably the user increased @@group_concat_max_len between preparation
+      and execution. The Field we have set up may be too short for the
+      new requested length.
+    */
+    if (ask_to_reprepare(thd)) return true;
+    assert(false);
+    // Continue; we'll truncate more than wanted. Should not happen.
+  }
+
+  const bool order_or_distinct = m_order_arg_count > 0 || distinct;
+
+  assert(tmp_table_param == nullptr);
+  tmp_table_param = new (thd->mem_root) Temp_table_param;
+  if (tmp_table_param == nullptr) return true;
+
+  // Create a temporary list with the required fields
+  mem_root_deque<Item *> fields(thd->mem_root);
+
+  // First add the fields from the concat field list
+  for (uint i = 0; i < m_field_arg_count; i++) {
+    Item *item = args[i];
+    fields.push_back(item);
+    if (item->const_for_execution() &&
+        evaluate_during_optimization(item, aggr_query_block)) {
+      if (item->is_null()) m_null_executed = true;
+      if (thd->is_error()) return true;
+      if (m_null_executed) return false;
+    }
+  }
+  // Then prepend the ordered fields not already in the "fields" list
+  for (uint i = 0; i < m_order_arg_count; i++) {
+    bool skip = false;
+    for (Item *item : fields) {
+      if (item == order_array[i].item[0]) skip = true;
+    }
+    if (skip) continue;
+    fields.push_front(order_array[i].item[0]);
+  }
+
+  count_field_types(aggr_query_block, tmp_table_param, fields, false, true);
+  tmp_table_param->force_copy_fields = force_copy_fields;
+
+  /*
+    Create a temporary table to get descriptions of fields (types, sizes, etc).
+    The table contains the ORDER BY fields followed by the field list.
+  */
+  assert(table == nullptr);
+  table =
+      create_tmp_table(thd, tmp_table_param, fields, nullptr, false, true,
+                       aggr_query_block->active_options(), HA_POS_ERROR, "");
+  if (table == nullptr) return true;
+
+  table->file->ha_extra(HA_EXTRA_NO_ROWS);
+  table->no_rows = true;
+
+  /*
+    Initialize blob_storage if GROUP_CONCAT is used
+    with ORDER BY | DISTINCT and BLOB field count > 0.
+  */
+  if (order_or_distinct && table->s->blob_fields) {
+    table->blob_storage = new (thd->mem_root) Blob_mem_storage();
+    if (table->blob_storage == nullptr) return true;
+  }
+  /*
+     Need sorting or uniqueness: init tree and choose a function to sort.
+     Don't reserve space for NULLs: if any of gconcat arguments is NULL,
+     the row is not added to the result.
+  */
+  const uint tree_key_length = table->s->reclength - table->s->null_bytes;
+
+  if (m_order_arg_count > 0) {
+    tree = &tree_base;
+    /*
+      Create a tree for sorting. The tree is used to sort (according to the
+      syntax of this function). If there is no ORDER BY clause, we don't
+      create this tree.
+    */
+    init_tree(tree, 0, tree_key_length, group_concat_key_cmp_with_order, false,
+              nullptr, this);
+  }
+
+  if (distinct) {
+    unique_filter = new (thd->mem_root)
+        Unique(group_concat_key_cmp_with_distinct, (void *)this,
+               tree_key_length, ram_limitation(thd));
+    if (unique_filter == nullptr) return true;
+  }
+
+  null_value = true;
+
+  return false;
+}
+
+/* This is used by rollup to create a separate usable copy of the function */
+
+void Item_func_ai::make_unique() {
+  tmp_table_param = nullptr;
+  table = nullptr;
+  original = nullptr;
+  force_copy_fields = true;
+  tree = nullptr;
+}
+
+double Item_func_ai::val_real() {
+  String *res = val_str(&str_value);
+  if (res == nullptr) return error_real();
+  return double_from_string_with_check(collation.collation, res->ptr(),
+                                       res->ptr() + res->length());
+}
+
+bool Item_func_ai::ask_ai() {
+  // change MySQL built-in String into std::string
+  std::string keywords(result.ptr(), result.length());
+  std::string user_question(question->ptr(), question->length());
+  std::string model_name(model->ptr(), model->length());
+  std::string prompt = "This is all the data under the \"" + target_field + "\" column in a MYSQL table. Do not reveal your internal thought process. Only output the answer without displaying any extra information.";
+  std::string user_content = "{" + keywords + "}. " + user_question + " " + prompt;
+
+  // create json
+  json j;
+  j["model"] = model_name;
+  j["messages"] = json::array();
+  j["messages"].push_back({{"role", "user"}, {"content", user_content}});
+  j["stream"] = false;
+  std::string jsonData = j.dump();
+
+  httplib::Client cli("http://host.docker.internal:11434");
+
+  // send POST request to /api/chat
+  auto res = cli.Post("/api/chat", jsonData, "application/json");
+  if (!res) {
+      // std::cerr << "HTTP 请求失败，未获得响应。\n";
+      return true;  // error happens
+  }
+  if (res->status != 200) {
+      // std::cerr << "HTTP 错误，状态码: " << res->status << "\n";
+      return true;
+  }
+
+  std::string responseString = res->body;
+
+  // parse JSON 
+  std::istringstream iss(responseString);
+  std::string line;
+  std::string completeAnswer;
+  while (std::getline(iss, line)) {
+      if (line.empty()) continue;
+      try {
+          json parsed_json = json::parse(line);
+          if (parsed_json.contains("message") && parsed_json["message"].contains("content")) {
+              std::string content_item = parsed_json["message"]["content"].get<std::string>();
+              std::string answer = "";
+              if (model_name == "qwen2.5:3b") {
+                answer = content_item;
+              } else if (model_name == "deepseek-r1:7b") {
+                // std::cout << "content_item: " << content_item << std::endl;
+                std::regex remove_think_tag_pattern("<think>[\\s\\S]*?</think>");
+                answer = std::regex_replace(content_item, remove_think_tag_pattern, "");
+                // std::cout << "answer: " << answer << std::endl;
+              }
+              completeAnswer += answer;
+          }
+
+          if (parsed_json.contains("done") && parsed_json["done"].get<bool>() == true) {
+              break;
+          }
+      } catch (const json::exception &e) {
+          std::cerr << "JSON parse error: " << e.what() << "\n";
+      }
+  }
+
+  result.copy(completeAnswer.c_str(), completeAnswer.size(), &my_charset_latin1);
+  
+  return false;
+}
+
+String *Item_func_ai::val_str(String *) {
+  assert(fixed);
+  if (null_value) return nullptr;
+
+  if (!m_result_finalized)  // Result yet to be written.
+  {
+    if (tree != nullptr)  // order by
+      tree_walk(tree, &dump_leaf_key, this, left_root_right);
+    else if (distinct)  // distinct (and no order by).
+      unique_filter->walk(&dump_leaf_key, this);
+    else
+      assert(false);  // Can't happen
+  }
+
+  if (table && table->blob_storage &&
+      table->blob_storage->is_truncated_value()) {
+    warning_for_row = true;
+    push_warning_printf(
+        current_thd, Sql_condition::SL_WARNING, ER_CUT_VALUE_GROUP_CONCAT,
+        ER_THD(current_thd, ER_CUT_VALUE_GROUP_CONCAT), row_count);
+  }
+
+  if (ask_ai()) {
+    std::string error = "Error: No answer from ai.";
+    result.copy(error.c_str(), error.size(), &my_charset_latin1);
+  }
+
+  return &result;
+}
+
+void Item_func_ai::print(const THD *thd, String *str,
+                               enum_query_type query_type) const {
+  str->append(STRING_WITH_LEN("group_concat("));
+  if (distinct) str->append(STRING_WITH_LEN("distinct "));
+  for (uint i = 0; i < m_field_arg_count; i++) {
+    if (i) str->append(',');
+    args[i]->print(thd, str, query_type);
+  }
+  if (m_order_arg_count > 0) {
+    str->append(STRING_WITH_LEN(" order by "));
+    for (uint i = 0; i < m_order_arg_count; i++) {
+      if (i) str->append(',');
+      args[i + m_field_arg_count]->print(thd, str, query_type);
+      if (order_array[i].direction == ORDER_ASC)
+        str->append(STRING_WITH_LEN(" ASC"));
+      else
+        str->append(STRING_WITH_LEN(" DESC"));
+    }
+  }
+  str->append(STRING_WITH_LEN(" separator \'"));
+
+  if (query_type & QT_TO_SYSTEM_CHARSET) {
+    // Convert to system charset.
+    convert_and_print(separator, str, system_charset_info);
+  } else if (query_type & QT_TO_ARGUMENT_CHARSET) {
+    /*
+      Convert the string literals to str->charset(),
+      which is typically equal to charset_set_client.
+    */
+    convert_and_print(separator, str, str->charset());
+  } else {
+    separator->print(str);
+  }
+  str->append(STRING_WITH_LEN("\')"));
 }
 
 /**

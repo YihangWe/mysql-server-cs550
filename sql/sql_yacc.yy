@@ -1459,9 +1459,9 @@ void warn_on_deprecated_user_defined_collation(
 %token<lexer.keyword> PARAMETERS_SYM  1216     /* MYSQL */
 %token<lexer.keyword> HEADER_SYM      1217     /* MYSQL */
 %token                LIBRARY_SYM     1218     /* MYSQL */
-%token  HLL_SYM 1219                     /* MYSQL */
-
-
+%token  AI_SYM 1219 /* MYSQL */
+%token  QUESTION_SYM 1220 /* MYSQL */
+%token  AI_MODEL_SYM 1221 /* MYSQL */
 
 /*
   NOTE! When adding new non-standard keywords, make sure they are added to the
@@ -1568,6 +1568,8 @@ void warn_on_deprecated_user_defined_collation(
 %type <string>
         text_string opt_gconcat_separator
         opt_xml_rows_identified_by
+        question
+        ai_model_name
 
 %type <num>
         lock_option
@@ -11076,14 +11078,6 @@ sum_expr:
           {
             $$= NEW_PTN Item_sum_xor(@$, $3, $5);
           }
-        | HLL_SYM '(' opt_all '*' ')' opt_windowing_clause
-          {
-            $$= NEW_PTN PTI_hyperloglog_sym(@$, $6);
-          }
-        | HLL_SYM '(' in_sum_expr ')' opt_windowing_clause
-          {
-            $$= NEW_PTN Item_sum_hyperloglog(@$, $3, $5);
-          }
         | COUNT_SYM '(' opt_all '*' ')' opt_windowing_clause
           {
             $$= NEW_PTN PTI_count_sym(@$, $6);
@@ -11147,6 +11141,13 @@ sum_expr:
           ')' opt_windowing_clause
           {
             $$= NEW_PTN Item_func_group_concat(@$, $3, $4, $5, $6, $8);
+          }
+        | AI_SYM '(' opt_distinct
+          expr_list question ai_model_name opt_gorder_clause
+          opt_gconcat_separator
+          ')' opt_windowing_clause
+          {
+            $$= NEW_PTN Item_func_ai(@$, $3, $4, $5, $6, $7, $8, $10);
           }
         ;
 
@@ -11555,6 +11556,26 @@ opt_gconcat_separator:
               MYSQL_YYABORT;
           }
         | SEPARATOR_SYM text_string { $$ = $2; }
+        ;
+
+question:
+          %empty
+          {
+            $$= NEW_PTN String("Please summarize the data.", 26, &my_charset_latin1);
+            if ($$ == nullptr)
+              MYSQL_YYABORT;
+          }
+        | QUESTION_SYM text_string { $$ = $2; }
+        ;
+
+ai_model_name:
+          %empty
+          {
+            $$= NEW_PTN String("qwen2.5:3b", 10, &my_charset_latin1);
+            if ($$ == nullptr)
+              MYSQL_YYABORT;
+          }
+        | AI_MODEL_SYM text_string { $$ = $2; }
         ;
 
 opt_gorder_clause:

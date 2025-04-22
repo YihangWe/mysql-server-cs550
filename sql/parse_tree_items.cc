@@ -637,12 +637,6 @@ bool PTI_get_system_variable::do_itemize(Parse_context *pc, Item **res) {
   return *res == nullptr;
 }
 
-bool PTI_hyperloglog_sym::do_itemize(Parse_context *pc, Item **res) {
-  args[0] = new (pc->mem_root) Item_int(int32{0}, 1);
-  if (args[0] == nullptr) return true;
-  return super::do_itemize(pc, res);
-}
-
 bool PTI_count_sym::do_itemize(Parse_context *pc, Item **res) {
   args[0] = new (pc->mem_root) Item_int(int32{0}, 1);
   if (args[0] == nullptr) return true;

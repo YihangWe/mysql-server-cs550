@@ -441,7 +441,7 @@ static ulong innodb_default_row_format = DEFAULT_ROW_FORMAT_DYNAMIC;
 #ifdef UNIV_DEBUG
 /** Values for --innodb-debug-compress names. */
 static const char *innodb_debug_compress_names[] = {"none", "zlib", "lz4",
-                                                    "lz4hc", NullS};
+                                                    "lz4hc", "zstd", NullS};
 
 /** Enumeration of --innodb-debug-compress */
 static TYPELIB innodb_debug_compress_typelib = {
@@ -636,16 +636,16 @@ const struct _ft_vft_ext ft_vft_ext_result = {
 
 #ifdef HAVE_PSI_INTERFACE
 #define PSI_KEY(n, flag, volatility, doc) \
-  {&(n##_key.m_value), #n, flag, volatility, doc}
+  { &(n##_key.m_value), #n, flag, volatility, doc }
 #define PSI_MEMORY_KEY(n, flag, volatility, doc) \
-  {&(n##_key), #n, flag, volatility, doc}
+  { &(n##_key), #n, flag, volatility, doc }
 #define PSI_MUTEX_KEY(n, flag, volatility, doc) \
-  {&(n##_key.m_value), #n, flag, volatility, doc}
+  { &(n##_key.m_value), #n, flag, volatility, doc }
 /* All RWLOCK used in Innodb are SX-locks */
 #define PSI_RWLOCK_KEY(n, volatility, doc) \
-  {&n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc}
+  { &n##_key.m_value, #n, PSI_FLAG_RWLOCK_SX, volatility, doc }
 #define PSI_THREAD_KEY(n, osn, flag, volatility, doc) \
-  {&(n##_key.m_value), #n, osn, flag, volatility, doc}
+  { &(n##_key.m_value), #n, osn, flag, volatility, doc }
 
 /* Keys to register pthread mutexes/cond in the current file with
 performance schema */
@@ -2613,6 +2613,9 @@ dberr_t Compression::check(const char *algorithm, Compression *compression) {
   } else if (innobase_strcasecmp(algorithm, "lz4") == 0) {
     compression->m_type = LZ4;
 
+  } else if (innobase_strcasecmp(algorithm, "zstd") == 0) {
+    compression->m_type = ZSTD;
+
   } else {
     return (DB_UNSUPPORTED);
   }
@@ -2636,6 +2639,7 @@ bool Compression::validate(const Compression::Type type) {
     case NONE:
     case ZLIB:
     case LZ4:
+    case ZSTD:
       break;
     default:
       ret = false;
