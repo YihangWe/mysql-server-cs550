@@ -1462,6 +1462,7 @@ void warn_on_deprecated_user_defined_collation(
 %token  AI_SYM 1219 /* MYSQL */
 %token  QUESTION_SYM 1220 /* MYSQL */
 %token  AI_MODEL_SYM 1221 /* MYSQL */
+%token  HLL_SYM 1222 /* MYSQL */
 
 /*
   NOTE! When adding new non-standard keywords, make sure they are added to the
@@ -11077,6 +11078,14 @@ sum_expr:
         | BIT_XOR_SYM  '(' in_sum_expr ')' opt_windowing_clause
           {
             $$= NEW_PTN Item_sum_xor(@$, $3, $5);
+          }
+        | HLL_SYM '(' opt_all '*' ')' opt_windowing_clause
+          {
+            $$= NEW_PTN PTI_hyperloglog_sym(@$, $6);
+          }
+        | HLL_SYM '(' in_sum_expr ')' opt_windowing_clause
+          {
+            $$= NEW_PTN Item_sum_hyperloglog(@$, $3, $5);
           }
         | COUNT_SYM '(' opt_all '*' ')' opt_windowing_clause
           {

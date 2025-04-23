@@ -103,6 +103,7 @@ class Aggregator {
   friend class Item_sum_sum;
   friend class Item_sum_count;
   friend class Item_sum_avg;
+  friend class Item_sum_hyperloglog;
   /*
     All members are protected as this class is not usable outside of an
     Item_sum descendant.
@@ -439,6 +440,7 @@ class Item_sum : public Item_func {
   enum Sumfunctype {
     COUNT_FUNC,           // COUNT
     COUNT_DISTINCT_FUNC,  // COUNT (DISTINCT)
+    HYPERLOGLOG_FUNC,     // HYPERLOGLOG
     SUM_FUNC,             // SUM
     SUM_DISTINCT_FUNC,    // SUM (DISTINCT)
     AVG_FUNC,             // AVG
@@ -1063,6 +1065,61 @@ class Item_sum_sum : public Item_sum_num {
   void reset_field() override;
   void update_field() override;
   const char *func_name() const override { return "sum"; }
+  Item *copy_or_same(THD *thd) override;
+};
+
+// HLL
+class Item_sum_hyperloglog : public Item_sum_int {
+  longlong count;
+
+  friend class Aggregator_distinct;
+
+  void clear() override;
+  bool add() override;
+  void cleanup() override;
+
+ public:
+  uint32_t register_index_bits;
+  uint32_t register_number;
+  std::vector<uint32_t> registers;
+
+  Item_sum_hyperloglog(const POS &pos, Item *item_par, PT_window *w,
+                       uint32_t register_index_bits = 10)
+      : Item_sum_int(pos, item_par, w),
+        count(0),
+        register_index_bits(register_index_bits),
+        register_number(1U << register_index_bits),
+        registers(register_number, 0) {}
+
+  // Item_sum_hyperloglog(const POS &pos, PT_item_list *list, PT_window *w)
+  // : Item_sum_int(pos, list, w), count(0) {
+  // set_distinct(true);
+  // }
+
+  Item_sum_hyperloglog(THD *thd, Item_sum_hyperloglog *item)
+      : Item_sum_int(thd, item), count(item->count) {}
+
+  enum Sumfunctype sum_func() const override { return HYPERLOGLOG_FUNC; }
+
+  bool resolve_type(THD *thd) override {
+    if (param_type_is_default(thd, 0, -1)) return true;
+    set_nullable(false);
+    null_value = false;
+    return false;
+  }
+
+  void no_rows_in_result() override { count = 0; }
+
+  void make_const(longlong count_arg) {
+    count = count_arg;
+    Item_sum::make_const();
+  }
+
+  void calculate_hll_res();
+  longlong val_int() override;
+  void reset_field() override;
+  void update_field() override;
+  const char *func_name() const override { return "hyperloglog"; }
   Item *copy_or_same(THD *thd) override;
 };
 
@@ -2141,21 +2198,22 @@ class Item_func_ai final : public Item_sum {
     Following is 0 normal object and pointer to original one for copy
     (to correctly free resources)
   */
- Item_func_ai *original{nullptr};
+  Item_func_ai *original{nullptr};
 
   friend int group_concat_key_cmp_with_distinct_deepseek(const void *arg,
-                                                const void *key1,
-                                                const void *key2);
-  friend int group_concat_key_cmp_with_order_deepseek(const void *arg, const void *key1,
-                                             const void *key2);
-  friend int dump_leaf_key_deepseek(void *key_arg, element_count count [[maybe_unused]],
-                           void *item_arg);
+                                                         const void *key1,
+                                                         const void *key2);
+  friend int group_concat_key_cmp_with_order_deepseek(const void *arg,
+                                                      const void *key1,
+                                                      const void *key2);
+  friend int dump_leaf_key_deepseek(void *key_arg,
+                                    element_count count [[maybe_unused]],
+                                    void *item_arg);
 
  public:
- Item_func_ai(const POS &pos, bool is_distinct,
-                         PT_item_list *select_list, String *question, String *model,
-                         PT_order_list *opt_order_list, String *separator,
-                         PT_window *w);
+  Item_func_ai(const POS &pos, bool is_distinct, PT_item_list *select_list,
+               String *question, String *model, PT_order_list *opt_order_list,
+               String *separator, PT_window *w);
 
   Item_func_ai(THD *thd, Item_func_ai *item);
   ~Item_func_ai() override {

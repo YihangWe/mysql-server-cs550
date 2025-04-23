@@ -39,14 +39,15 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <utility>  // std::forward
-#include <iostream>
-#include <regex>
 
 #include "decimal.h"
 #include "field_types.h"
+#include "httplib.h"
+#include "json.hpp"
 #include "my_alloc.h"
 #include "my_base.h"
 #include "my_byteorder.h"
@@ -102,8 +103,6 @@
 #include "sql/uniques.h"           // Unique
 #include "sql/window.h"
 #include "string_with_len.h"
-#include "json.hpp"
-#include "httplib.h"
 
 using json = nlohmann::json;
 using std::max;
@@ -2228,6 +2227,116 @@ bool Aggregator_distinct::arg_is_null(bool use_null_value) {
                            item_sum->args[0]->is_null());
 }
 
+Item *Item_sum_hyperloglog::copy_or_same(THD *thd) {
+  DBUG_TRACE;
+  Item *result = m_is_window_function ? this
+                                      : new (thd->mem_root)
+                                            Item_sum_hyperloglog(thd, this);
+  return result;
+}
+
+void Item_sum_hyperloglog::clear() { count = 0; }
+
+uint32_t zero_num(uint32_t bits, uint32_t max_bits) {
+  if (bits == 0) return max_bits;
+  return __builtin_clz(bits) - (32 - max_bits);
+}
+
+// HLL function
+bool Item_sum_hyperloglog::add() {
+  assert(!m_is_window_function);
+  if (aggr->arg_is_null(false)) {
+    return current_thd->is_error();
+  }
+
+  double value = aggr->arg_val_real();
+  std::hash<double> double_hash;
+  uint32_t hash_value = static_cast<uint32_t>(double_hash(value));
+  uint32_t register_index = hash_value >> (32 - register_index_bits);
+  uint32_t bits = hash_value & ((1U << (32 - register_index_bits)) - 1);
+  uint32_t rank = zero_num(bits, 32 - register_index_bits) + 1;
+  if (rank > registers[register_index]) {
+    registers[register_index] = rank;
+  }
+
+  // if (current_thd->is_error()) return true;
+  if (!aggr->arg_is_null(true)) null_value = false;
+  return current_thd->is_error();
+}
+
+void Item_sum_hyperloglog::calculate_hll_res() {
+  double alpha;
+  if (register_number == 16) {
+    alpha = 0.673;
+  } else if (register_number == 32) {
+    alpha = 0.697;
+  } else if (register_number == 64) {
+    alpha = 0.709;
+  } else {
+    alpha = 0.7213 / (1 + 1.079 / register_number);
+  }
+
+  double Z = 0.0;
+  for (auto v : registers) {
+    Z += 1.0 / (1U << v);
+  }
+  double E = alpha * register_number * register_number / Z;
+
+  if (E <= 2.5 * register_number) {
+    unsigned int V = 0;
+    for (auto v : registers) {
+      if (v == 0) V++;
+    }
+    if (V > 0)
+      E = register_number * std::log(static_cast<double>(register_number) / V);
+  } else if (E > (1.0 / 30) * (1ULL << 32)) {
+    E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
+  }
+
+  // return static_cast<unsigned int>(E);
+  count = static_cast<unsigned int>(E);
+}
+
+longlong Item_sum_hyperloglog::val_int() {
+  DBUG_TRACE;
+  assert(fixed);
+  if (m_is_window_function) {
+    if (wf_common_init()) return 0;
+
+    DBUG_EXECUTE_IF(("enter"), {
+      DBUG_PRINT("enter", ("Item_sum_hyperloglog::val_int arg0 %p", args[0]));
+      if (dynamic_cast<Item_field *>(args[0])) {
+        Item_field *f = down_cast<Item_field *>(args[0]);
+        DBUG_PRINT(("enter"),
+                   ("Item_sum_hyperloglog::val_int field: %p ptr: %p", f->field,
+                    f->field->field_ptr()));
+      }
+    });
+
+    if (args[0]->is_null()) {
+      return count;
+    }
+    if (m_window->do_inverse()) {
+      if (count > 0) count--;
+    } else {
+      count++;
+    }
+    null_value = false;
+
+    return count;
+  } else {
+    calculate_hll_res();
+    if (aggr) aggr->endup();
+    return count;
+  }
+}
+
+void Item_sum_hyperloglog::cleanup() {
+  DBUG_TRACE;
+  count = 0;
+  Item_sum_int::cleanup();
+}
+
 Item *Item_sum_count::copy_or_same(THD *thd) {
   DBUG_TRACE;
   Item *result = m_is_window_function ? this
@@ -3465,6 +3574,14 @@ void Item_sum_sum::reset_field() {
     result_field->set_notnull();
 }
 
+void Item_sum_hyperloglog::reset_field() {
+  longlong nr = 0;
+  assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
+
+  if (!args[0]->is_nullable() || !args[0]->is_null()) nr = 1;
+  int8store(result_field->field_ptr(), nr);
+}
+
 void Item_sum_count::reset_field() {
   longlong nr = 0;
   assert(aggr->Aggrtype() != Aggregator::DISTINCT_AGGREGATOR);
@@ -3564,6 +3681,15 @@ void Item_sum_sum::update_field() {
     }
     float8store(res, old_nr);
   }
+}
+
+void Item_sum_hyperloglog::update_field() {
+  longlong nr;
+  uchar *res = result_field->field_ptr();
+
+  nr = sint8korr(res);
+  if (!args[0]->is_nullable() || !args[0]->is_null()) nr++;
+  int8store(res, nr);
 }
 
 void Item_sum_count::update_field() {
@@ -4121,8 +4247,7 @@ int group_concat_key_cmp_with_distinct_deepseek(const void *arg,
                                                 const void *key1,
                                                 const void *key2) {
   DBUG_TRACE;
-  const Item_func_ai *item_func =
-      static_cast<const Item_func_ai *>(arg);
+  const Item_func_ai *item_func = static_cast<const Item_func_ai *>(arg);
   TABLE *table = item_func->table;
 
   for (uint i = 0; i < item_func->m_field_arg_count; i++) {
@@ -4196,8 +4321,7 @@ int group_concat_key_cmp_with_order(const void *arg, const void *key1,
 int group_concat_key_cmp_with_order_deepseek(const void *arg, const void *key1,
                                              const void *key2) {
   DBUG_TRACE;
-  const Item_func_ai *grp_item =
-      static_cast<const Item_func_ai *>(arg);
+  const Item_func_ai *grp_item = static_cast<const Item_func_ai *>(arg);
   const ORDER *order_item, *end;
   TABLE *table = grp_item->table;
 
@@ -4409,11 +4533,9 @@ int dump_leaf_key_deepseek(void *key_arg, element_count count [[maybe_unused]],
 */
 
 Item_func_ai::Item_func_ai(const POS &pos, bool distinct_arg,
-                                       PT_item_list *select_list,
-                                       String *question,
-                                       String *model,
-                                       PT_order_list *opt_order_list,
-                                       String *separator_arg, PT_window *w)
+                           PT_item_list *select_list, String *question,
+                           String *model, PT_order_list *opt_order_list,
+                           String *separator_arg, PT_window *w)
     : super(pos, w),
       distinct(distinct_arg),
       m_order_arg_count(opt_order_list ? opt_order_list->value.elements : 0),
@@ -4570,9 +4692,8 @@ Field *Item_func_ai::make_string_field(TABLE *table_arg) const {
 
 Item *Item_func_ai::copy_or_same(THD *thd) {
   DBUG_TRACE;
-  Item *result = m_is_window_function ? this
-                                      : new (thd->mem_root)
-                                            Item_func_ai(thd, this);
+  Item *result =
+      m_is_window_function ? this : new (thd->mem_root) Item_func_ai(thd, this);
   return result;
 }
 
@@ -4872,8 +4993,12 @@ bool Item_func_ai::ask_ai() {
   std::string keywords(result.ptr(), result.length());
   std::string user_question(question->ptr(), question->length());
   std::string model_name(model->ptr(), model->length());
-  std::string prompt = "This is all the data under the \"" + target_field + "\" column in a MYSQL table. Do not reveal your internal thought process. Only output the answer without displaying any extra information.";
-  std::string user_content = "{" + keywords + "}. " + user_question + " " + prompt;
+  std::string prompt = "This is all the data under the \"" + target_field +
+                       "\" column in a MYSQL table. Do not reveal your "
+                       "internal thought process. Only output the answer "
+                       "without displaying any extra information.";
+  std::string user_content =
+      "{" + keywords + "}. " + user_question + " " + prompt;
 
   // create json
   json j;
@@ -4888,48 +5013,53 @@ bool Item_func_ai::ask_ai() {
   // send POST request to /api/chat
   auto res = cli.Post("/api/chat", jsonData, "application/json");
   if (!res) {
-      // std::cerr << "HTTP 请求失败，未获得响应。\n";
-      return true;  // error happens
+    // std::cerr << "HTTP 请求失败，未获得响应。\n";
+    return true;  // error happens
   }
   if (res->status != 200) {
-      // std::cerr << "HTTP 错误，状态码: " << res->status << "\n";
-      return true;
+    // std::cerr << "HTTP 错误，状态码: " << res->status << "\n";
+    return true;
   }
 
   std::string responseString = res->body;
 
-  // parse JSON 
+  // parse JSON
   std::istringstream iss(responseString);
   std::string line;
   std::string completeAnswer;
   while (std::getline(iss, line)) {
-      if (line.empty()) continue;
-      try {
-          json parsed_json = json::parse(line);
-          if (parsed_json.contains("message") && parsed_json["message"].contains("content")) {
-              std::string content_item = parsed_json["message"]["content"].get<std::string>();
-              std::string answer = "";
-              if (model_name == "qwen2.5:3b") {
-                answer = content_item;
-              } else if (model_name == "deepseek-r1:7b") {
-                // std::cout << "content_item: " << content_item << std::endl;
-                std::regex remove_think_tag_pattern("<think>[\\s\\S]*?</think>");
-                answer = std::regex_replace(content_item, remove_think_tag_pattern, "");
-                // std::cout << "answer: " << answer << std::endl;
-              }
-              completeAnswer += answer;
-          }
-
-          if (parsed_json.contains("done") && parsed_json["done"].get<bool>() == true) {
-              break;
-          }
-      } catch (const json::exception &e) {
-          std::cerr << "JSON parse error: " << e.what() << "\n";
+    if (line.empty()) continue;
+    try {
+      json parsed_json = json::parse(line);
+      if (parsed_json.contains("message") &&
+          parsed_json["message"].contains("content")) {
+        std::string content_item =
+            parsed_json["message"]["content"].get<std::string>();
+        std::string answer = "";
+        if (model_name == "qwen2.5:3b") {
+          answer = content_item;
+        } else if (model_name == "deepseek-r1:7b") {
+          // std::cout << "content_item: " << content_item << std::endl;
+          std::regex remove_think_tag_pattern("<think>[\\s\\S]*?</think>");
+          answer =
+              std::regex_replace(content_item, remove_think_tag_pattern, "");
+          // std::cout << "answer: " << answer << std::endl;
+        }
+        completeAnswer += answer;
       }
+
+      if (parsed_json.contains("done") &&
+          parsed_json["done"].get<bool>() == true) {
+        break;
+      }
+    } catch (const json::exception &e) {
+      std::cerr << "JSON parse error: " << e.what() << "\n";
+    }
   }
 
-  result.copy(completeAnswer.c_str(), completeAnswer.size(), &my_charset_latin1);
-  
+  result.copy(completeAnswer.c_str(), completeAnswer.size(),
+              &my_charset_latin1);
+
   return false;
 }
 
@@ -4964,7 +5094,7 @@ String *Item_func_ai::val_str(String *) {
 }
 
 void Item_func_ai::print(const THD *thd, String *str,
-                               enum_query_type query_type) const {
+                         enum_query_type query_type) const {
   str->append(STRING_WITH_LEN("group_concat("));
   if (distinct) str->append(STRING_WITH_LEN("distinct "));
   for (uint i = 0; i < m_field_arg_count; i++) {

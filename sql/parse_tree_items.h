@@ -444,6 +444,16 @@ class PTI_count_sym : public Item_sum_count {
   bool do_itemize(Parse_context *pc, Item **res) override;
 };
 
+class PTI_hyperloglog_sym : public Item_sum_hyperloglog {
+  typedef Item_sum_hyperloglog super;
+  
+  public:
+  PTI_hyperloglog_sym(const POS &pos, PT_window *w)
+  : super(pos, (Item *)nullptr, w) {}
+  
+  bool do_itemize(Parse_context *pc, Item **res) override;
+};
+
 class PTI_in_sum_expr : public Parse_tree_item {
   typedef Parse_tree_item super;
 

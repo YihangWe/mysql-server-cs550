@@ -830,6 +830,7 @@ static const SYMBOL symbols[] = {
     {SYM_FN("BIT_XOR", BIT_XOR_SYM)},
     {SYM_FN("CAST", CAST_SYM)},
     {SYM_FN("COUNT", COUNT_SYM)},
+    {SYM_FN("HLL", HLL_SYM)},
     {SYM_FN("CURDATE", CURDATE)},
     {SYM_FN("CURTIME", CURTIME)},
     {SYM_FN("DATE_ADD", DATE_ADD_INTERVAL)},
