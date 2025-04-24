@@ -2276,25 +2276,25 @@ void Item_sum_hyperloglog::calculate_hll_res() {
     alpha = 0.7213 / (1 + 1.079 / register_number);
   }
 
-  double Z = 0.0;
-  for (auto v : registers) {
-    Z += 1.0 / (1U << v);
+  double factor = 0.0;
+  for (auto regi : registers) {
+    factor += 1.0 / (1U << regi);
   }
-  double E = alpha * register_number * register_number / Z;
+  double estimated_value = alpha * register_number * register_number / factor;
 
-  if (E <= 2.5 * register_number) {
-    unsigned int V = 0;
-    for (auto v : registers) {
-      if (v == 0) V++;
+  if (estimated_value <= 2.5 * register_number) {
+    unsigned int register_value_zero = 0;
+    for (auto regi : registers) {
+      if (regi == 0) register_value_zero++;
     }
-    if (V > 0)
-      E = register_number * std::log(static_cast<double>(register_number) / V);
-  } else if (E > (1.0 / 30) * (1ULL << 32)) {
-    E = -(1ULL << 32) * std::log(1 - E / static_cast<double>(1ULL << 32));
+    if (register_value_zero > 0)
+    estimated_value = register_number * std::log(static_cast<double>(register_number) / register_value_zero);
+  } else if (estimated_value > (1.0 / 30) * (1ULL << 32)) {
+    estimated_value = -(1ULL << 32) * std::log(1 - estimated_value / static_cast<double>(1ULL << 32));
   }
 
   // return static_cast<unsigned int>(E);
-  count = static_cast<unsigned int>(E);
+  count = static_cast<unsigned int>(estimated_value);
 }
 
 longlong Item_sum_hyperloglog::val_int() {
