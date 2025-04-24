@@ -1328,7 +1328,7 @@ buf_block_t *buf_LRU_get_free_block(buf_pool_t *buf_pool) {
     bool flag = false;
 
     while (true) {
-      std::cout << "Currently Using Clock Sweep" << std::endl;
+      // std::cout << "Currently Using Clock Sweep" << std::endl;
       buf_LRU_check_size_of_non_data_objects(buf_pool);
 
       block = buf_LRU_get_free_only(buf_pool);
@@ -1426,7 +1426,7 @@ buf_block_t *buf_LRU_get_free_block(buf_pool_t *buf_pool) {
     }
   }
 loop:
-  std::cout << "Currently Using LRU" << std::endl;
+  // std::cout << "Currently Using LRU" << std::endl;
 
   buf_LRU_check_size_of_non_data_objects(buf_pool);
 

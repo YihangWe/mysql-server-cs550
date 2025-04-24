@@ -4993,72 +4993,79 @@ bool Item_func_ai::ask_ai() {
   std::string keywords(result.ptr(), result.length());
   std::string user_question(question->ptr(), question->length());
   std::string model_name(model->ptr(), model->length());
+
   std::string prompt = "This is all the data under the \"" + target_field +
                        "\" column in a MYSQL table. Do not reveal your "
                        "internal thought process. Only output the answer "
                        "without displaying any extra information.";
+
   std::string user_content =
       "{" + keywords + "}. " + user_question + " " + prompt;
 
   // create json
   json j;
   j["model"] = model_name;
-  j["messages"] = json::array();
-  j["messages"].push_back({{"role", "user"}, {"content", user_content}});
+  j["prompt"] = user_content;
+  // j["input"] = json::array();
+  // j["input"].push_back({{"role", "user"}, {"content", user_content}});
   j["stream"] = false;
   std::string jsonData = j.dump();
 
   httplib::Client cli("http://host.docker.internal:11434");
 
   // send POST request to /api/chat
-  auto res = cli.Post("/api/chat", jsonData, "application/json");
+  auto res = cli.Post("/api/generate", jsonData, "application/json");
+  
   if (!res) {
-    // std::cerr << "HTTP 请求失败，未获得响应。\n";
+    std::cerr << "HTTP 请求失败，未获得响应。\n";
     return true;  // error happens
   }
+  
   if (res->status != 200) {
-    // std::cerr << "HTTP 错误，状态码: " << res->status << "\n";
+    std::cerr << "HTTP 错误，状态码: " << res->status << "\n";
     return true;
   }
 
   std::string responseString = res->body;
 
+  std::cout << "response: " << responseString << std::endl;
+
   // parse JSON
   std::istringstream iss(responseString);
   std::string line;
-  std::string completeAnswer;
+
   while (std::getline(iss, line)) {
     if (line.empty()) continue;
     try {
-      json parsed_json = json::parse(line);
-      if (parsed_json.contains("message") &&
-          parsed_json["message"].contains("content")) {
-        std::string content_item =
-            parsed_json["message"]["content"].get<std::string>();
-        std::string answer = "";
+      json parsed_json = json::parse(responseString);
+      if (parsed_json.contains("response")) {
+        std::string content_item = parsed_json["response"].get<std::string>();
+
+        std::string answer;
+    
         if (model_name == "qwen2.5:3b") {
           answer = content_item;
         } else if (model_name == "deepseek-r1:7b") {
           // std::cout << "content_item: " << content_item << std::endl;
+    
+          // 去除 <think> 标签
           std::regex remove_think_tag_pattern("<think>[\\s\\S]*?</think>");
-          answer =
-              std::regex_replace(content_item, remove_think_tag_pattern, "");
+          answer = std::regex_replace(content_item, remove_think_tag_pattern, "");
           // std::cout << "answer: " << answer << std::endl;
         }
-        completeAnswer += answer;
+    
+        // 写入结果字段
+        result.copy(answer.c_str(), answer.size(), &my_charset_latin1);
+      } else {
+        std::cerr << "未找到 response 字段。\n";
+        return true;
       }
-
-      if (parsed_json.contains("done") &&
-          parsed_json["done"].get<bool>() == true) {
-        break;
-      }
-    } catch (const json::exception &e) {
-      std::cerr << "JSON parse error: " << e.what() << "\n";
+    
+    } catch (const json::exception& e) {
+      std::cerr << "JSON parsing error: " << e.what() << "\n";
+      return true;
     }
   }
-
-  result.copy(completeAnswer.c_str(), completeAnswer.size(),
-              &my_charset_latin1);
 
   return false;
 }
