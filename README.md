@@ -19,3 +19,16 @@ For additional downloads and the source of MySQL, visit
   http://dev.mysql.com/downloads/
 
 MySQL is brought to you by the MySQL team at Oracle.
+
+# Enhancement
+4 new functionalities.
+
+1. Clock Sweep Buffer Pool
+2. HyperLogLog
+3. DeepSeek-r1 and Qwen2.5
+4. ZSTD Compression
+
+# Future Work
+1. Vectorization Model
+2. Multi-threading Operator
+3. Lock Scheduling
