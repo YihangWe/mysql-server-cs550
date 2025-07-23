@@ -1,24 +1,3 @@
-Copyright (c) 2000, 2025, Oracle and/or its affiliates.
-
-This is a release of MySQL, an SQL database server.
-
-License information can be found in the LICENSE file.
-
-In test packages where this file is renamed README-test, the license
-file is renamed LICENSE-test.
-
-This distribution may include materials developed by third parties.
-For license and attribution notices for these materials,
-please refer to the LICENSE file.
-
-For further information on MySQL or additional documentation, visit
-  http://dev.mysql.com/doc/
-
-For additional downloads and the source of MySQL, visit
-  http://dev.mysql.com/downloads/
-
-MySQL is brought to you by the MySQL team at Oracle.
-
 # Background
 尽管 MySQL 作为一个起源于上世纪九十年代中期、经久不衰的关系型数据库管理系统，依然是最受欢迎的数据存储与管理方案之一，但随着新型数据库技术的不断涌现以及对更高效系统需求的增长，持续优化其性能以保持竞争力至关重要。
 
@@ -41,3 +20,25 @@ MySQL 最关键的组件之一是 InnoDB 存储引擎，其核心特性包括事
 
 2. 优化事务调度算法
 InnoDB 已将默认的锁调度策略由先来先服务升级为最大依赖集优先，以缓解锁竞争导致的性能瓶颈。更进一步的批量 LDSF（bLDSF）策略，则只对部分等待事务批量授予共享锁，而非一次性放行所有共享锁，从而避免拖尾问题——即最慢事务拖慢整个共享群组的进度。要实现 bLDSF，需在 InnoDB 的事务调度器中加入事务分组与批量锁申请的逻辑，并确保与现有的死锁检测和饥饿预防机制（如基于老化的优先级决胜）相兼容。尽管 bLDSF 在实现上更为复杂，但在高并发、高争用的场景中，极有可能带来显著的延迟改进。
+
+# License
+Copyright (c) 2000, 2025, Oracle and/or its affiliates.
+
+This is a release of MySQL, an SQL database server.
+
+License information can be found in the LICENSE file.
+
+In test packages where this file is renamed README-test, the license
+file is renamed LICENSE-test.
+
+This distribution may include materials developed by third parties.
+For license and attribution notices for these materials,
+please refer to the LICENSE file.
+
+For further information on MySQL or additional documentation, visit
+  http://dev.mysql.com/doc/
+
+For additional downloads and the source of MySQL, visit
+  http://dev.mysql.com/downloads/
+
+MySQL is brought to you by the MySQL team at Oracle.
