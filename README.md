@@ -15,7 +15,7 @@ MySQL 最关键的组件之一是 InnoDB 存储引擎，其核心特性包括事
 
 存储压缩优化
 - 采用 Zstandard 压缩算法，增强数据文件的压缩比，降低存储占用。
-    - 使用方式：`create table t1 (...)
+    - 使用方式：`create table tbl (...)
               engine = InnoDB
               compression = 'zstd';`。
 
