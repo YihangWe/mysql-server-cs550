@@ -6,13 +6,18 @@ MySQL 最关键的组件之一是 InnoDB 存储引擎，其核心特性包括事
 # Enhancement
 聚合性能提升
 - 引入基于 HyperLogLog 的聚合器，以加速常见的聚合计算。
+  - 使用方式： `select hll(col) from tbl where ...`。
 - 改造 SQL 解析器并设计新的 AI 驱动聚合器，使用户能直接向大型语言模型（LLM）发起查询，获取数据洞察。
+  - 使用方式：`select ai(QUESTION='...', MODEL='...') from tbl where ...`。
 
 缓冲池管理改进
 - 用通用时钟算法（GCLOCK）替换当前的 LRU 页面置换策略，以提高页表替换效率。
 
 存储压缩优化
 - 采用 Zstandard 压缩算法，增强数据文件的压缩比，降低存储占用。
+    - 使用方式：`CREATE TABLE t1 (id INT PRIMARY KEY, c VARCHAR(100))
+              ENGINE = InnoDB
+              COMPRESSION = 'zstd';`。
 
 # Future Work
 1. 在 InnoDB 引擎中引入多线程</br>
