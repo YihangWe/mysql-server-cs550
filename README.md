@@ -7,7 +7,7 @@ MySQL 最关键的组件之一是 InnoDB 存储引擎，其核心特性包括事
 聚合性能提升
 - 引入基于 HyperLogLog 的聚合器，以加速常见的近似聚合计算。
   - 使用方式：`select hll(col) from tbl where ...`。
-- 改造 SQL 解析器并设计新的 AI 驱动聚合器，使用户能直接向大型语言模型（LLM）发起查询，获取数据洞察。
+- 改造 SQL 解析器并设计新的 AI 驱动聚合器，使用户能直接向大语言模型发起查询，获取数据洞察，但是在使用前需要在本地部署 Ollama 以及对应的模型。
   - 使用方式：`select ai(col, QUESTION='...', MODEL='...') from tbl where ...`。
 
 缓冲池管理改进
