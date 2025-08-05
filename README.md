@@ -3,7 +3,7 @@
 
 MySQL 最关键的组件之一是 InnoDB 存储引擎，其核心特性包括事务支持、崩溃恢复、外键约束和多版本并发控制，使其成为当今 MySQL 中使用最广的存储引擎。在高并发、大数据量的使用场景下，资源利用效率往往成为性能瓶颈，因此对 InnoDB 进行有针对性的改进意义重大。
 
-# Enhancement
+# Enhancements
 聚合性能提升
 - 引入基于 HyperLogLog 的聚合器，以加速常见的近似聚合计算。
   - 使用方式：`select hll(col) from tbl where ...`。
